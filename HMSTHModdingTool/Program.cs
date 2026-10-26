@@ -141,6 +141,7 @@ namespace HMSTHModdingTool
             if (args.Length < 2)
             {
                 PrintUsage();
+                Environment.ExitCode = 1;
                 return;
             }
 
@@ -716,6 +717,7 @@ namespace HMSTHModdingTool
                             if (args.Length != 2 && args.Length != 4)
                             {
                                 Console.WriteLine("Usage: verify <file.hda|file.rdtb|file.gdtb|file.srdb> [--json <report.json>]");
+                                Environment.ExitCode = 1;
                                 return;
                             }
 
@@ -726,6 +728,7 @@ namespace HMSTHModdingTool
                                     !args[2].Equals("-json", StringComparison.OrdinalIgnoreCase))
                                 {
                                     Console.WriteLine("Usage: verify <file.hda|file.rdtb|file.gdtb|file.srdb> [--json <report.json>]");
+                                    Environment.ExitCode = 1;
                                     return;
                                 }
                                 jsonPath = args[3];
@@ -733,7 +736,9 @@ namespace HMSTHModdingTool
 
                             // Validation is read-only. Its own report includes PASS/FAIL,
                             // so don't append the generic success message for malformed files.
-                            ArchiveValidator.Verify(args[1], jsonPath);
+                            bool verificationSucceeded =
+                                ArchiveValidator.Verify(args[1], jsonPath);
+                            Environment.ExitCode = verificationSucceeded ? 0 : 1;
                             customFinish = true;
                         }
                         break;
