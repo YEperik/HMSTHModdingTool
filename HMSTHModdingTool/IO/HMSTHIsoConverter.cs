@@ -1,4 +1,4 @@
-﻿using HMSTHModdingTool.IO;
+using HMSTHModdingTool.IO;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -162,10 +162,9 @@ namespace HMSTHModdingTool
         {
             if (!File.Exists(inputPath))
             {
-                TextOut.PrintError(
-                    "File not found: " +
+                throw new FileNotFoundException(
+                    "ISO conversion input file was not found.",
                     inputPath);
-                return;
             }
 
             // ─── Force output extension
@@ -244,7 +243,9 @@ namespace HMSTHModdingTool
                     "═══════════════════");
                 Console.ResetColor();
                 Console.WriteLine();
-                return;
+                throw new ArgumentException(
+                    "DVD output must use the .iso or .img extension.",
+                    "outputPath");
             }
 
             // ─── Load input ─────────────────
@@ -265,6 +266,12 @@ namespace HMSTHModdingTool
             DetectFormat(input,
                 out inSectorSize,
                 out inDataOff);
+
+            if (input.Length == 0 || input.Length % inSectorSize != 0)
+            {
+                throw new InvalidDataException(
+                    "Input image size must be a non-empty exact multiple of its detected sector size.");
+            }
 
             if (inSectorSize == SEC)
             {
@@ -299,7 +306,8 @@ namespace HMSTHModdingTool
                     "  Input is already" +
                     " a DVD ISO!");
                 Console.ResetColor();
-                return;
+                throw new InvalidOperationException(
+                    "Input is already a DVD ISO; no DVD conversion was performed.");
             }
             if (!toDvd && isInputCd)
             {
@@ -309,21 +317,24 @@ namespace HMSTHModdingTool
                     "  Input is already" +
                     " a CD ISO!");
                 Console.ResetColor();
-                return;
+                throw new InvalidOperationException(
+                    "Input is already a CD ISO; no CD conversion was performed.");
             }
             if (toDvd && !isInputCd)
             {
                 TextOut.PrintError(
                     "Input is not a valid" +
                     " HMSTH CD ISO!");
-                return;
+                throw new InvalidDataException(
+                    "Input is not a valid HMSTH CD ISO.");
             }
             if (!toDvd && !isInputDvd)
             {
                 TextOut.PrintError(
                     "Input is not a valid" +
                     " HMSTH DVD ISO!");
-                return;
+                throw new InvalidDataException(
+                    "Input is not a valid HMSTH DVD ISO.");
             }
 
             // ─── Find main ELF & version ────
@@ -333,7 +344,8 @@ namespace HMSTHModdingTool
             {
                 TextOut.PrintError(
                     "Main ELF not found!");
-                return;
+                throw new InvalidDataException(
+                    "Main ELF was not found in the source image.");
             }
             int inElfOff = inElfSec * SEC;
             GameVersion gv = DetectVersion(
@@ -376,9 +388,10 @@ namespace HMSTHModdingTool
                     ConsoleColor.Red;
                 Console.WriteLine(
                     "  Conversion aborted" +
-                    " due to memory error.");
+                    " because output construction failed.");
                 Console.ResetColor();
-                return;
+                throw new InvalidOperationException(
+                    "Conversion did not produce a complete output image.");
             }
 
             // ─── Determine output format ────
@@ -427,14 +440,16 @@ namespace HMSTHModdingTool
                     "FILE \"" +
                     Path.GetFileName(outputPath) +
                     "\" BINARY\r\n" +
-                    "  TRACK 01 MODE1/2352\r\n" +
+                    "  TRACK 01 MODE2/2352\r\n" +
                     "    INDEX 01 00:00:00\r\n";
-                File.WriteAllText(
-                    cuePath, cueContent);
-
+                string cueBackupPath =
+                    SafeFileReplacement.WriteAllTextWithBackup(
+                        cuePath, cueContent);
                 Console.WriteLine(
                     "  Also created: " +
                     Path.GetFileName(cuePath));
+                if (!string.IsNullOrEmpty(cueBackupPath))
+                    Console.WriteLine("  Previous CUE preserved as backup: " + cueBackupPath);
             }
             else
             {
@@ -447,8 +462,11 @@ namespace HMSTHModdingTool
                     $" ({output.Length / SEC:N0}" +
                     " sectors)");
 
-                File.WriteAllBytes(
-                    outputPath, output);
+                string outputBackupPath =
+                    SafeFileReplacement.WriteAllBytesWithBackup(
+                        outputPath, output);
+                if (!string.IsNullOrEmpty(outputBackupPath))
+                    Console.WriteLine("  Previous output preserved as backup: " + outputBackupPath);
             }
 
             Console.WriteLine();
@@ -492,13 +510,12 @@ namespace HMSTHModdingTool
                     " to BIN)");
                 Console.ResetColor();
 
-                string tempIso =
-                    outputPath + ".tmp.iso";
+                string tempIso = SafeFileReplacement.CreateTemporarySiblingPath(outputPath, ".iso");
 
                 try
                 {
                     // Write ISO output to temp
-                    File.WriteAllBytes(
+                    SafeFileReplacement.WriteAllBytesWithBackup(
                         tempIso, output);
 
                     // Free the output buffer
@@ -528,9 +545,8 @@ namespace HMSTHModdingTool
                     ConvertIsoToBinStream(
                         fixedIso, outputPath);
 
-                    // Delete temp
-                    if (File.Exists(tempIso))
-                        File.Delete(tempIso);
+                    // Delete the scratch ISO and release its in-process registration.
+                    SafeFileReplacement.TryDeleteTemporaryFile(tempIso);
 
                     Console.ForegroundColor =
                         ConsoleColor.Green;
@@ -550,8 +566,7 @@ namespace HMSTHModdingTool
 
                     try
                     {
-                        if (File.Exists(tempIso))
-                            File.Delete(tempIso);
+                        SafeFileReplacement.TryDeleteTemporaryFile(tempIso);
                     }
                     catch (Exception cleanupException)
                     {
@@ -559,6 +574,8 @@ namespace HMSTHModdingTool
                             "[WARN] Could not remove temporary ISO '" + tempIso +
                             "': " + cleanupException.Message);
                     }
+
+                    throw;
                 }
 
                 Console.WriteLine();
@@ -1748,6 +1765,7 @@ namespace HMSTHModdingTool
             bool isDvd,
             bool skipLba = false)
         {
+            bool hadErrors = false;
             Console.ForegroundColor =
                 ConsoleColor.Yellow;
             Console.WriteLine(
@@ -1767,6 +1785,7 @@ namespace HMSTHModdingTool
             }
             catch (Exception ex)
             {
+                hadErrors = true;
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
                 Console.WriteLine(
@@ -1791,6 +1810,7 @@ namespace HMSTHModdingTool
             }
             catch (Exception ex)
             {
+                hadErrors = true;
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
                 Console.WriteLine(
@@ -1831,6 +1851,7 @@ namespace HMSTHModdingTool
                 }
                 catch (Exception ex)
                 {
+                    hadErrors = true;
                     Console.ForegroundColor =
                         ConsoleColor.Yellow;
                     Console.WriteLine(
@@ -1841,8 +1862,17 @@ namespace HMSTHModdingTool
             }
 
             Console.WriteLine();
-            Console.ForegroundColor =
-                ConsoleColor.Green;
+            if (hadErrors)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine(
+                    "Auto-fix completed with warnings; one or more steps failed.");
+                Console.ResetColor();
+                throw new IOException(
+                    "Auto-fix did not fully succeed. Review the warnings above.");
+            }
+
+            Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine(
                 "═══════════════════" +
                 "═══════════════════");
@@ -1994,86 +2024,96 @@ namespace HMSTHModdingTool
             byte[] iso,
             string outputPath)
         {
+            if (iso == null)
+                throw new ArgumentNullException("iso");
+            if (iso.Length == 0 || iso.Length % SEC != 0)
+            {
+                throw new InvalidDataException(
+                    "ISO data must contain complete 2048-byte sectors.");
+            }
+
             int numSec = iso.Length / SEC;
+            long expectedLength = checked((long)numSec * 2352L);
+            string temporaryPath =
+                SafeFileReplacement.CreateTemporarySiblingPath(outputPath);
 
-            byte[] sync = new byte[]
+            try
             {
-                0x00, 0xFF, 0xFF, 0xFF,
-                0xFF, 0xFF, 0xFF, 0xFF,
-                0xFF, 0xFF, 0xFF, 0x00
-            };
-
-            // Reusable per-sector buffer
-            byte[] secBuf = new byte[2352];
-
-            using (var fs = new FileStream(
-                outputPath,
-                FileMode.Create,
-                FileAccess.Write,
-                FileShare.None,
-                65536))
-            {
-                for (int s = 0;
-                     s < numSec; s++)
+                byte[] sync = new byte[]
                 {
-                    Array.Clear(secBuf, 0,
-                        2352);
+                    0x00, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0xFF,
+                    0xFF, 0xFF, 0xFF, 0x00
+                };
 
-                    // Sync (12 bytes)
-                    Array.Copy(sync, 0,
-                        secBuf, 0, 12);
-
-                    // Header (MSF + mode)
-                    int lba = s + 150;
-                    int minute =
-                        lba / (60 * 75);
-                    int second =
-                        (lba / 75) % 60;
-                    int frame = lba % 75;
-
-                    secBuf[12] =
-                        ToBcd(minute);
-                    secBuf[13] =
-                        ToBcd(second);
-                    secBuf[14] =
-                        ToBcd(frame);
-                    secBuf[15] = 0x02;
-
-                    // Subheader Mode2 Form1
-                    secBuf[16] = 0x00;
-                    secBuf[17] = 0x00;
-                    secBuf[18] = 0x08;
-                    secBuf[19] = 0x00;
-                    secBuf[20] = 0x00;
-                    secBuf[21] = 0x00;
-                    secBuf[22] = 0x08;
-                    secBuf[23] = 0x00;
-
-                    // User data
-                    Array.Copy(iso,
-                        s * SEC,
-                        secBuf, 24,
-                        SEC);
-
-                    // EDC/ECC stays zero
-
-                    fs.Write(secBuf, 0,
-                        2352);
-
-                    // Progress report
-                    if (s % 50000 == 0
-                        && s > 0)
+                byte[] sectorBuffer = new byte[2352];
+                using (var destination = new FileStream(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    65536,
+                    FileOptions.SequentialScan))
+                {
+                    for (int sector = 0; sector < numSec; sector++)
                     {
-                        double pct =
-                            (double)s /
-                            numSec *
-                            100.0;
-                        Console.Write(
-                            $"\r  " +
-                            $"Writing BIN:" +
-                            $" {pct:F1}%");
+                        Array.Clear(sectorBuffer, 0, sectorBuffer.Length);
+                        Array.Copy(sync, 0, sectorBuffer, 0, sync.Length);
+
+                        int lba = sector + 150;
+                        int minute = lba / (60 * 75);
+                        int second = (lba / 75) % 60;
+                        int frame = lba % 75;
+
+                        sectorBuffer[12] = ToBcd(minute);
+                        sectorBuffer[13] = ToBcd(second);
+                        sectorBuffer[14] = ToBcd(frame);
+                        sectorBuffer[15] = 0x02;
+
+                        // Subheader Mode 2 Form 1, preserving the existing format.
+                        sectorBuffer[16] = 0x00;
+                        sectorBuffer[17] = 0x00;
+                        sectorBuffer[18] = 0x08;
+                        sectorBuffer[19] = 0x00;
+                        sectorBuffer[20] = 0x00;
+                        sectorBuffer[21] = 0x00;
+                        sectorBuffer[22] = 0x08;
+                        sectorBuffer[23] = 0x00;
+
+                        Array.Copy(
+                            iso, sector * SEC,
+                            sectorBuffer, 24, SEC);
+                        destination.Write(
+                            sectorBuffer, 0, sectorBuffer.Length);
+
+                        if (sector > 0 && sector % 50000 == 0)
+                        {
+                            double percentage = (double)sector / numSec * 100.0;
+                            Console.Write(
+                                "\r  Writing BIN: {0:F1}%",
+                                percentage);
+                        }
                     }
+
+                    destination.Flush();
                 }
+
+                long actualLength = new FileInfo(temporaryPath).Length;
+                if (actualLength != expectedLength)
+                {
+                    throw new IOException(
+                        "Converted BIN size mismatch. Expected " +
+                        expectedLength + " bytes but wrote " + actualLength + " bytes.");
+                }
+
+                string backupPath = SafeFileReplacement.InstallWithBackup(
+                    temporaryPath, outputPath);
+                if (!string.IsNullOrEmpty(backupPath))
+                    Console.WriteLine("  Previous output preserved as backup: " + backupPath);
+            }
+            finally
+            {
+                SafeFileReplacement.TryDeleteTemporaryFile(temporaryPath);
             }
 
             Console.WriteLine();
@@ -2175,10 +2215,9 @@ namespace HMSTHModdingTool
         {
             if (!File.Exists(inputPath))
             {
-                TextOut.PrintError(
-                    "File not found: " +
+                throw new FileNotFoundException(
+                    "ISO/BIN conversion input file was not found.",
                     inputPath);
-                return;
             }
 
             // ─── Force output extension
@@ -2212,7 +2251,9 @@ namespace HMSTHModdingTool
                 TextOut.PrintError(
                     "Output extension must" +
                     " be .iso or .bin!");
-                return;
+                throw new ArgumentException(
+                    "Output extension must be .iso, .img, .bin, or .raw.",
+                    "outputPath");
             }
 
             // ─── Print banner ────────────
@@ -2256,6 +2297,12 @@ namespace HMSTHModdingTool
             DetectFormat(input,
                 out inSectorSize,
                 out inDataOff);
+
+            if (input.Length == 0 || input.Length % inSectorSize != 0)
+            {
+                throw new InvalidDataException(
+                    "Input image size must be a non-empty exact multiple of its detected sector size.");
+            }
 
             string inFmt =
                 inSectorSize == SEC
@@ -2328,7 +2375,8 @@ namespace HMSTHModdingTool
                     "═══════════════════");
                 Console.ResetColor();
                 Console.WriteLine();
-                return;
+                throw new InvalidDataException(
+                    "convertiso does not accept DVD images; use tocd first.");
             }
 
             if (!inputIsCd)
@@ -2357,7 +2405,8 @@ namespace HMSTHModdingTool
                     "═══════════════════");
                 Console.ResetColor();
                 Console.WriteLine();
-                return;
+                throw new InvalidDataException(
+                    "Input is not a valid HMSTH CD ISO.");
             }
 
             Console.ForegroundColor =
@@ -2419,14 +2468,16 @@ namespace HMSTHModdingTool
                     "FILE \"" +
                     Path.GetFileName(outputPath) +
                     "\" BINARY\r\n" +
-                    "  TRACK 01 MODE1/2352\r\n" +
+                    "  TRACK 01 MODE2/2352\r\n" +
                     "    INDEX 01 00:00:00\r\n";
-                File.WriteAllText(
-                    cuePath, cueContent);
-
+                string cueBackupPath =
+                    SafeFileReplacement.WriteAllTextWithBackup(
+                        cuePath, cueContent);
                 Console.WriteLine(
                     "  Also created: " +
                     Path.GetFileName(cuePath));
+                if (!string.IsNullOrEmpty(cueBackupPath))
+                    Console.WriteLine("  Previous CUE preserved as backup: " + cueBackupPath);
             }
             else
             {
@@ -2439,8 +2490,11 @@ namespace HMSTHModdingTool
                     $" ({iso2048.Length / SEC:N0}" +
                     " sectors)");
 
-                File.WriteAllBytes(
-                    outputPath, iso2048);
+                string outputBackupPath =
+                    SafeFileReplacement.WriteAllBytesWithBackup(
+                        outputPath, iso2048);
+                if (!string.IsNullOrEmpty(outputBackupPath))
+                    Console.WriteLine("  Previous output preserved as backup: " + outputBackupPath);
             }
 
             Console.WriteLine();
@@ -2490,14 +2544,13 @@ namespace HMSTHModdingTool
                     " to BIN)");
                 Console.ResetColor();
 
-                string tempIso =
-                    outputPath + ".tmp.iso";
+                string tempIso = SafeFileReplacement.CreateTemporarySiblingPath(outputPath, ".iso");
 
                 try
                 {
                     // Write ISO 2048 data
                     // to temp file
-                    File.WriteAllBytes(
+                    SafeFileReplacement.WriteAllBytesWithBackup(
                         tempIso, iso2048);
 
                     // Free the iso2048 buffer
@@ -2526,9 +2579,8 @@ namespace HMSTHModdingTool
                     ConvertIsoToBinStream(
                         fixedIso, outputPath);
 
-                    // Delete temp
-                    if (File.Exists(tempIso))
-                        File.Delete(tempIso);
+                    // Delete the scratch ISO and release its in-process registration.
+                    SafeFileReplacement.TryDeleteTemporaryFile(tempIso);
 
                     Console.ForegroundColor =
                         ConsoleColor.Green;
@@ -2549,8 +2601,7 @@ namespace HMSTHModdingTool
                     // Cleanup temp on error
                     try
                     {
-                        if (File.Exists(tempIso))
-                            File.Delete(tempIso);
+                        SafeFileReplacement.TryDeleteTemporaryFile(tempIso);
                     }
                     catch (Exception cleanupException)
                     {
@@ -2558,6 +2609,8 @@ namespace HMSTHModdingTool
                             "[WARN] Could not remove temporary ISO '" + tempIso +
                             "': " + cleanupException.Message);
                     }
+
+                    throw;
                 }
 
                 Console.WriteLine();
