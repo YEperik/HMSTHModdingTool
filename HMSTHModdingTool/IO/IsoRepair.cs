@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text;
+using HMSTHModdingTool.IO;
 
 namespace HMSTHModdingTool
 {
@@ -74,8 +75,19 @@ namespace HMSTHModdingTool
                     ? "OK"
                     : "MISSING"));
 
+            // Never transform an image whose sector layout cannot be
+            // corroborated by the primary volume descriptor. The detector
+            // has a size-divisibility fallback, which alone is not enough
+            // evidence to safely rewrite the source image.
+            if (!pvdOk)
+            {
+                throw new InvalidDataException(
+                    "The ISO primary volume descriptor (CD001) could not be verified. " +
+                    "The source image was not modified.");
+            }
+
             if (detectedSize ==
-                SECTOR_2048 && pvdOk)
+                SECTOR_2048)
             {
                 Console.ForegroundColor =
                     ConsoleColor.Green;
@@ -165,7 +177,7 @@ namespace HMSTHModdingTool
             byte[] sync = new byte[12];
             using (var fs =
                 File.OpenRead(path))
-                fs.Read(sync, 0, 12);
+                SafeFileReplacement.ReadExactly(fs, sync, sync.Length);
 
             bool syncOk =
                 sync[0] == 0x00 &&
@@ -196,7 +208,7 @@ namespace HMSTHModdingTool
                     fs.Position =
                         16 * SECTOR_2048
                         + 1;
-                    fs.Read(test, 0, 5);
+                    SafeFileReplacement.ReadExactly(fs, test, test.Length);
                 }
 
                 if (test[0] == 0x43 &&
@@ -221,7 +233,7 @@ namespace HMSTHModdingTool
                         16 * SECTOR_2352
                         + RAW_DATA_OFF
                         + 1;
-                    fs.Read(test, 0, 5);
+                    SafeFileReplacement.ReadExactly(fs, test, test.Length);
                 }
 
                 if (test[0] == 0x43 &&
@@ -253,10 +265,48 @@ namespace HMSTHModdingTool
         {
             int dataOff = 0;
             if (sectorSize == SECTOR_2352)
-                dataOff = RAW_DATA_OFF;
-            else if (sectorSize ==
-                     SECTOR_2336)
+            {
+                // Raw Mode 1 data starts at +16; Mode 2 Form 1 data starts
+                // at +24 after its XA subheader. Read the PVD sector mode
+                // instead of assuming every 2352-byte image is Mode 2.
+                long modeOffset = (long)16 * SECTOR_2352 + 15;
+                if (modeOffset >= new FileInfo(path).Length)
+                    return false;
+
+                using (var modeStream = new FileStream(
+                    path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    modeStream.Position = modeOffset;
+                    int mode = modeStream.ReadByte();
+                    if (mode == 1)
+                    {
+                        dataOff = 16;
+                    }
+                    else if (mode == 2)
+                    {
+                        byte[] subheader = new byte[8];
+                        modeStream.Position = (long)16 * SECTOR_2352 + 16;
+                        SafeFileReplacement.ReadExactly(
+                            modeStream, subheader, subheader.Length);
+                        // Mode 2 Form 2 has 2324-byte payloads, not the
+                        // 2048-byte ISO user-data layout expected here.
+                        if ((subheader[2] & 0x20) != 0 ||
+                            (subheader[6] & 0x20) != 0)
+                        {
+                            return false;
+                        }
+                        dataOff = RAW_DATA_OFF;
+                    }
+                    else
+                    {
+                        return false;
+                    }
+                }
+            }
+            else if (sectorSize == SECTOR_2336)
+            {
                 dataOff = 8;
+            }
 
             long pvdPos =
                 (long)16 * sectorSize +
@@ -273,7 +323,7 @@ namespace HMSTHModdingTool
                 File.OpenRead(path))
             {
                 fs.Position = pvdPos;
-                fs.Read(check, 0, 6);
+                SafeFileReplacement.ReadExactly(fs, check, check.Length);
             }
 
             // Type 01 + "CD001"
@@ -289,125 +339,217 @@ namespace HMSTHModdingTool
         // ═══════════════════════════════
         // CONVERT 2352 → 2048 IN-PLACE
         // ═══════════════════════════════
-        static void ConvertInPlace2352to2048(
-            string path)
+        static void ConvertInPlace2352to2048(string path)
         {
-            string tempPath =
-                path + ".tmp";
+            string temporaryPath =
+                SafeFileReplacement.CreateTemporarySiblingPath(path);
 
-            long fileSize =
-                new FileInfo(path).Length;
-            long totalSectors =
-                fileSize / SECTOR_2352;
-
-            Console.WriteLine(
-                "  Sectors: " +
-                totalSectors);
-
-            byte[] raw =
-                new byte[SECTOR_2352];
-            byte[] data =
-                new byte[SECTOR_2048];
-
-            using (var src =
-                File.OpenRead(path))
-            using (var dst =
-                File.Create(tempPath))
+            try
             {
-                long report = 0;
-                for (long s = 0;
-                     s < totalSectors;
-                     s++)
+                long totalSectors;
+                long expectedLength;
+
+                using (var source = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    65536,
+                    FileOptions.SequentialScan))
                 {
-                    src.Read(
-                        raw, 0,
-                        SECTOR_2352);
-
-                    // Extract user data
-                    // from offset 24
-                    Array.Copy(
-                        raw,
-                        RAW_DATA_OFF,
-                        data,
-                        0,
-                        SECTOR_2048);
-
-                    dst.Write(
-                        data, 0,
-                        SECTOR_2048);
-
-                    if (s - report >=
-                        10000)
+                    long sourceLength = source.Length;
+                    if (sourceLength == 0 || sourceLength % SECTOR_2352 != 0)
                     {
-                        report = s;
-                        double pct =
-                            (double)s /
-                            totalSectors *
-                            100.0;
-                        Console.Write(
-                            "\r  " +
-                            "Progress: " +
-                            "{0:F1}%",
-                            pct);
+                        throw new InvalidDataException(
+                            "The source size is not a complete 2352-byte-sector image.");
+                    }
+
+                    totalSectors = sourceLength / SECTOR_2352;
+                    expectedLength = checked(totalSectors * (long)SECTOR_2048);
+
+                    Console.WriteLine("  Sectors: " + totalSectors);
+
+                    byte[] raw = new byte[SECTOR_2352];
+                    byte[] data = new byte[SECTOR_2048];
+
+                    using (var destination = new FileStream(
+                        temporaryPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        65536,
+                        FileOptions.SequentialScan))
+                    {
+                        long report = 0;
+                        for (long sector = 0; sector < totalSectors; sector++)
+                        {
+                            SafeFileReplacement.ReadExactly(
+                                source, raw, SECTOR_2352);
+                            int dataOffset;
+                            if (raw[15] == 0x01)
+                            {
+                                dataOffset = 16;
+                            }
+                            else if (raw[15] == 0x02)
+                            {
+                                // Reject Mode 2 Form 2 sectors: they do not
+                                // contain a 2048-byte user-data payload.
+                                if ((raw[18] & 0x20) != 0 ||
+                                    (raw[22] & 0x20) != 0)
+                                {
+                                    throw new InvalidDataException(
+                                        "Mode 2 Form 2 sector encountered; cannot convert it to a 2048-byte ISO sector.");
+                                }
+                                dataOffset = RAW_DATA_OFF;
+                            }
+                            else
+                            {
+                                throw new InvalidDataException(
+                                    "Unsupported raw sector mode " + raw[15] +
+                                    " at LBA " + sector + ".");
+                            }
+
+                            Array.Copy(
+                                raw, dataOffset,
+                                data, 0, SECTOR_2048);
+                            destination.Write(data, 0, SECTOR_2048);
+
+                            if (sector - report >= 10000)
+                            {
+                                report = sector;
+                                double percentage =
+                                    (double)sector / totalSectors * 100.0;
+                                Console.Write(
+                                    "\r  Progress: {0:F1}%",
+                                    percentage);
+                            }
+                        }
+
+                        destination.Flush();
                     }
                 }
+
+                long outputLength = new FileInfo(temporaryPath).Length;
+                if (outputLength != expectedLength)
+                {
+                    throw new IOException(
+                        "Converted ISO size mismatch. Expected " +
+                        expectedLength + " bytes but wrote " + outputLength + " bytes.");
+                }
+
+                string backupPath;
+                if (SafeFileReplacement.IsTemporarySiblingPath(path))
+                {
+                    SafeFileReplacement.ReplaceTemporaryFileWithoutBackup(
+                        temporaryPath, path);
+                    backupPath = null;
+                }
+                else
+                {
+                    backupPath = SafeFileReplacement.ReplaceExistingWithBackup(
+                        temporaryPath, path);
+                }
+
+                Console.Write("\r  Progress: 100.0%   \n");
+                if (!string.IsNullOrEmpty(backupPath))
+                {
+                    Console.WriteLine(
+                        "  Original preserved as backup: " +
+                        Path.GetFileName(backupPath));
+                }
             }
-
-            Console.Write(
-                "\r  Progress: " +
-                "100.0%   \n");
-
-            // Replace original file
-            File.Delete(path);
-            File.Move(tempPath, path);
+            finally
+            {
+                SafeFileReplacement.TryDeleteTemporaryFile(temporaryPath);
+            }
         }
 
         // ═══════════════════════════════
         // CONVERT 2336 → 2048 IN-PLACE
         // ═══════════════════════════════
-        static void ConvertInPlace2336to2048(
-            string path)
+        static void ConvertInPlace2336to2048(string path)
         {
-            string tempPath =
-                path + ".tmp";
+            string temporaryPath =
+                SafeFileReplacement.CreateTemporarySiblingPath(path);
 
-            long fileSize =
-                new FileInfo(path).Length;
-            long totalSectors =
-                fileSize / SECTOR_2336;
-
-            byte[] raw =
-                new byte[SECTOR_2336];
-            byte[] data =
-                new byte[SECTOR_2048];
-
-            using (var src =
-                File.OpenRead(path))
-            using (var dst =
-                File.Create(tempPath))
+            try
             {
-                for (long s = 0;
-                     s < totalSectors;
-                     s++)
+                long expectedLength;
+
+                using (var source = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    65536,
+                    FileOptions.SequentialScan))
                 {
-                    src.Read(
-                        raw, 0,
-                        SECTOR_2336);
+                    long sourceLength = source.Length;
+                    if (sourceLength == 0 || sourceLength % SECTOR_2336 != 0)
+                    {
+                        throw new InvalidDataException(
+                            "The source size is not a complete 2336-byte-sector image.");
+                    }
 
-                    // Data offset 8
-                    Array.Copy(
-                        raw, 8,
-                        data, 0,
-                        SECTOR_2048);
+                    long totalSectors = sourceLength / SECTOR_2336;
+                    expectedLength = checked(totalSectors * (long)SECTOR_2048);
 
-                    dst.Write(
-                        data, 0,
-                        SECTOR_2048);
+                    byte[] raw = new byte[SECTOR_2336];
+                    byte[] data = new byte[SECTOR_2048];
+
+                    using (var destination = new FileStream(
+                        temporaryPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        65536,
+                        FileOptions.SequentialScan))
+                    {
+                        for (long sector = 0; sector < totalSectors; sector++)
+                        {
+                            SafeFileReplacement.ReadExactly(
+                                source, raw, SECTOR_2336);
+                            Array.Copy(raw, 8, data, 0, SECTOR_2048);
+                            destination.Write(data, 0, SECTOR_2048);
+                        }
+
+                        destination.Flush();
+                    }
+                }
+
+                long outputLength = new FileInfo(temporaryPath).Length;
+                if (outputLength != expectedLength)
+                {
+                    throw new IOException(
+                        "Converted ISO size mismatch. Expected " +
+                        expectedLength + " bytes but wrote " + outputLength + " bytes.");
+                }
+
+                string backupPath;
+                if (SafeFileReplacement.IsTemporarySiblingPath(path))
+                {
+                    SafeFileReplacement.ReplaceTemporaryFileWithoutBackup(
+                        temporaryPath, path);
+                    backupPath = null;
+                }
+                else
+                {
+                    backupPath = SafeFileReplacement.ReplaceExistingWithBackup(
+                        temporaryPath, path);
+                }
+
+                if (!string.IsNullOrEmpty(backupPath))
+                {
+                    Console.WriteLine(
+                        "  Original preserved as backup: " +
+                        Path.GetFileName(backupPath));
                 }
             }
-
-            File.Delete(path);
-            File.Move(tempPath, path);
+            finally
+            {
+                SafeFileReplacement.TryDeleteTemporaryFile(temporaryPath);
+            }
         }
+
     }
 }
