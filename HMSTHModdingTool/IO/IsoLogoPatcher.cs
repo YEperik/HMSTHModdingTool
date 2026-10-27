@@ -19,14 +19,6 @@ namespace HMSTHModdingTool
         const int ECC_LEN = 276;
         const byte PADDING = 0xDD;
 
-        static readonly byte[]
-        SYNC_PATTERN = new byte[]
-        {
-            0x00, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0xFF,
-            0xFF, 0xFF, 0xFF, 0x00
-        };
-
         static readonly
         (int offset, byte[] data)[]
         MASTER_PATCHES = new[]
@@ -574,36 +566,12 @@ namespace HMSTHModdingTool
             byte[] data,
             int lba)
         {
-            Array.Clear(
-                raw, 0, SECTOR_2352);
-
-            Array.Copy(
-                SYNC_PATTERN, 0,
-                raw, 0, 12);
-
-            int minutes =
-                (lba + 150) / (60 * 75);
-            int seconds =
-                ((lba + 150) / 75) % 60;
-            int frames =
-                (lba + 150) % 75;
-
-            raw[12] = ToBcd(minutes);
-            raw[13] = ToBcd(seconds);
-            raw[14] = ToBcd(frames);
-            raw[15] = 0x02;
-
-            Array.Copy(
-                data, 0,
-                raw, DATA_OFF,
-                SECTOR_2048);
-        }
-
-        static byte ToBcd(int val)
-        {
-            return (byte)(
-                ((val / 10) << 4) |
-                (val % 10));
+            CdRomSectorEncoder.EncodeMode2Form1(
+                raw,
+                data,
+                0,
+                lba,
+                allowMinuteWrap: true);
         }
 
         // ═══════════════════════════════
