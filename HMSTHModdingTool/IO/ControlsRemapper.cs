@@ -547,12 +547,8 @@ namespace HMSTHModdingTool
             (0x0001833B, 0x01, 0x00),
         };
 
-        // ───────────────────────────────────────
-        // Detection: check first patch byte
-        // ───────────────────────────────────────
-        const int DETECT_OFF = 0x000047C8;
-        const byte DETECT_ORIG = 0x7A;
-        const byte DETECT_PATCH = 0xF1;
+        // All patch bytes must match one known state before any mutation.
+        // A marker byte alone is not enough to identify a safe input.
 
         // ═══════════════════════════════════════
         // PUBLIC ENTRY POINT
@@ -563,10 +559,9 @@ namespace HMSTHModdingTool
         {
             if (!File.Exists(path))
             {
-                TextOut.PrintError(
-                    "File not found: " +
+                throw new FileNotFoundException(
+                    "Controls remapper input file was not found.",
                     path);
-                return;
             }
 
             string name = Path
@@ -596,25 +591,19 @@ namespace HMSTHModdingTool
             byte[] elf =
                 File.ReadAllBytes(path);
 
-            if (DETECT_OFF >=
-                elf.Length)
-            {
-                TextOut.PrintError(
-                    "ELF file too small!");
-                return;
-            }
-
-            bool applied =
-                elf[DETECT_OFF] ==
-                DETECT_PATCH;
+            bool applied = DeterminePatchState(
+                elf, 0, 2048, 0);
 
             PrintBanner(gv, applied);
 
             ApplyToggleDirect(
                 elf, 0, applied);
 
-            File.WriteAllBytes(path, elf);
+            string backupPath =
+                SafeFileReplacement.WriteAllBytesWithBackup(path, elf);
             PrintSaved(path);
+            if (!string.IsNullOrEmpty(backupPath))
+                Console.WriteLine("  Original preserved as backup: " + backupPath);
         }
 
         // ═══════════════════════════════════════
@@ -636,6 +625,11 @@ namespace HMSTHModdingTool
             // ─── Detect format ──────────────
             int sectorSize =
                 DetectSectorSize(img);
+            if (img.Length == 0 || img.Length % sectorSize != 0)
+            {
+                throw new InvalidDataException(
+                    "Image length is not an exact multiple of the detected sector size.");
+            }
             int dataOff =
                 GetSectorDataOffset(
                     img, sectorSize);
@@ -659,10 +653,8 @@ namespace HMSTHModdingTool
 
             if (elfOff < 0)
             {
-                TextOut.PrintError(
-                    "HMSTH main ELF " +
-                    "not found in image!");
-                return;
+                throw new InvalidDataException(
+                    "HMSTH main ELF was not found in the image.");
             }
 
             // ─── Detect version ─────────────
@@ -682,50 +674,10 @@ namespace HMSTHModdingTool
                 $"0x{elfOff:X}");
             Console.ResetColor();
 
-            // ─── Check state ────────────────
-            // For BIN: use sector-aware check
-            bool applied;
-            if (sectorSize == 2048)
-            {
-                if (elfOff + DETECT_OFF >=
-                    img.Length)
-                {
-                    TextOut.PrintError(
-                        "ELF detection " +
-                        "offset out of range!");
-                    return;
-                }
-                applied =
-                    img[elfOff + DETECT_OFF] ==
-                    DETECT_PATCH;
-            }
-            else
-            {
-                // BIN: compute sector-aware
-                // absolute offset for detection
-                int elfSectorIdxD =
-                    (elfOff - dataOff) /
-                    sectorSize;
-                int chunkIdxD =
-                    DETECT_OFF / 2048;
-                int byteInChunkD =
-                    DETECT_OFF % 2048;
-                int absSectorD =
-                    elfSectorIdxD + chunkIdxD;
-                int absOffD =
-                    absSectorD * sectorSize +
-                    dataOff + byteInChunkD;
-                if (absOffD < 0 ||
-                    absOffD >= img.Length)
-                {
-                    TextOut.PrintError(
-                        "ELF detection " +
-                        "offset out of range!");
-                    return;
-                }
-                applied =
-                    img[absOffD] == DETECT_PATCH;
-            }
+            // Validate every target byte before changing the image. Mixed or
+            // unknown states are rejected instead of being partially patched.
+            bool applied = DeterminePatchState(
+                img, elfOff, sectorSize, dataOff);
 
             PrintBanner(gv, applied);
 
@@ -752,8 +704,11 @@ namespace HMSTHModdingTool
                 "Writing image...");
             Console.ResetColor();
 
-            File.WriteAllBytes(path, img);
+            string backupPath =
+                SafeFileReplacement.WriteAllBytesWithBackup(path, img);
             PrintSaved(path);
+            if (!string.IsNullOrEmpty(backupPath))
+                Console.WriteLine("  Original preserved as backup: " + backupPath);
 
             // ─── Auto-fix after patch ───────────
             // Always fix logo + LBA
@@ -782,6 +737,8 @@ namespace HMSTHModdingTool
             string realPath =
                 HarvestIso.GetRealPath(path);
 
+            bool autoFixHadErrors = false;
+
             // Step 1: Fix ISO structure
             // Only for .iso / .img
             if (remapIsIso)
@@ -798,6 +755,7 @@ namespace HMSTHModdingTool
                 }
                 catch (Exception ex)
                 {
+                    autoFixHadErrors = true;
                     Console.ForegroundColor =
                         ConsoleColor.Yellow;
                     Console.WriteLine(
@@ -834,6 +792,7 @@ namespace HMSTHModdingTool
             }
             catch (Exception ex)
             {
+                autoFixHadErrors = true;
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
                 Console.WriteLine(
@@ -867,6 +826,7 @@ namespace HMSTHModdingTool
             }
             catch (Exception ex)
             {
+                autoFixHadErrors = true;
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
                 Console.WriteLine(
@@ -876,8 +836,17 @@ namespace HMSTHModdingTool
             }
 
             Console.WriteLine();
-            Console.ForegroundColor =
-                ConsoleColor.Green;
+            if (autoFixHadErrors)
+            {
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                Console.WriteLine(
+                    "Controls were remapped, but one or more auto-fix steps failed.");
+                Console.ResetColor();
+                throw new IOException(
+                    "Controls remapping was saved, but auto-fix did not fully succeed.");
+            }
+
+            Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine(
                 "═══════════════════" +
                 "═══════════════════");
@@ -889,6 +858,81 @@ namespace HMSTHModdingTool
                 "═══════════════════");
             Console.ResetColor();
             Console.WriteLine();
+        }
+
+        private static bool DeterminePatchState(
+            byte[] data,
+            int elfDataStart,
+            int sectorSize,
+            int dataOff)
+        {
+            if (data == null)
+                throw new ArgumentNullException("data");
+            if (elfDataStart < 0 || elfDataStart > data.Length)
+                throw new InvalidDataException(
+                    "The detected ELF start offset is outside the input image.");
+            if (sectorSize != 2048 && sectorSize != 2352)
+                throw new InvalidDataException(
+                    "Unsupported sector size for control remapping.");
+            if (sectorSize != 2048 && (elfDataStart - dataOff) < 0)
+                throw new InvalidDataException(
+                    "The detected ELF offset is inconsistent with the sector data offset.");
+
+            bool allOriginal = true;
+            bool allPatched = true;
+
+            for (int i = 0; i < PATCH_TABLE.Length; i++)
+            {
+                var patch = PATCH_TABLE[i];
+                long absoluteOffset;
+                if (sectorSize == 2048)
+                {
+                    absoluteOffset = (long)elfDataStart + patch.offset;
+                }
+                else
+                {
+                    long elfSectorIndex =
+                        ((long)elfDataStart - dataOff) / sectorSize;
+                    long chunkIndex = patch.offset / 2048;
+                    long byteInChunk = patch.offset % 2048;
+                    absoluteOffset =
+                        (elfSectorIndex + chunkIndex) * sectorSize +
+                        dataOff + byteInChunk;
+                }
+
+                if (absoluteOffset < 0 || absoluteOffset >= data.LongLength)
+                {
+                    throw new InvalidDataException(
+                        "Control-remap target at ELF offset 0x" +
+                        patch.offset.ToString("X") +
+                        " is outside the input image; no changes were applied.");
+                }
+
+                byte current = data[(int)absoluteOffset];
+                if (current != patch.orig)
+                    allOriginal = false;
+                if (current != patch.patch)
+                    allPatched = false;
+
+                if (current != patch.orig && current != patch.patch)
+                {
+                    throw new InvalidDataException(
+                        "Control-remap target at ELF offset 0x" +
+                        patch.offset.ToString("X") +
+                        " contains an unknown byte value 0x" +
+                        current.ToString("X2") +
+                        "; input may be modified or unsupported, so no changes were applied.");
+                }
+            }
+
+            if (allOriginal)
+                return false;
+            if (allPatched)
+                return true;
+
+            throw new InvalidDataException(
+                "Control-remap bytes contain a mixed original/patched state; " +
+                "no changes were applied to avoid a partial toggle.");
         }
 
         // ═══════════════════════════════════════
@@ -907,7 +951,10 @@ namespace HMSTHModdingTool
                 int off = baseOff + p.offset;
                 if (off < 0 ||
                     off >= data.Length)
-                    continue;
+                {
+                    throw new InvalidDataException(
+                        "Control-remap patch offset is outside the input buffer.");
+                }
                 data[off] = revert
                     ? p.orig
                     : p.patch;
@@ -975,7 +1022,10 @@ namespace HMSTHModdingTool
 
                 if (absOff < 0 ||
                     absOff >= data.Length)
-                    continue;
+                {
+                    throw new InvalidDataException(
+                        "Sector-aware control-remap patch offset is outside the input buffer.");
+                }
 
                 data[absOff] = revert
                     ? p.orig
