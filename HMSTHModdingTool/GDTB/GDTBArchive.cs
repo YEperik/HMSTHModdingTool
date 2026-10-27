@@ -930,19 +930,18 @@ namespace HMSTHModdingTool.GDTB
                 out pp,
                 out pal);
 
+            // Work on a private buffer. If the disk write fails, _data remains
+            // consistent with the file that is still on disk.
+            byte[] updatedData = (byte[])_data.Clone();
+
             if (tex.IsPaletted)
             {
                 int po = tex.PaletteOffset;
-                int colors =
-                    tex.BitDepth == 8 ? 256 : 16;
-                byte[] oldPal =
-                    GetBytes(po, colors * 4);
-                byte[] final =
-                    new byte[pal.Length];
+                int colors = tex.BitDepth == 8 ? 256 : 16;
+                byte[] oldPal = GetBytes(po, colors * 4);
+                byte[] final = new byte[pal.Length];
 
-                for (int i = 0;
-                     i + 3 < pal.Length;
-                     i += 4)
+                for (int i = 0; i + 3 < pal.Length; i += 4)
                 {
                     int ai = i / 4;
                     byte alpha = ai < colors
@@ -954,27 +953,31 @@ namespace HMSTHModdingTool.GDTB
                     final[i + 3] = alpha;
                 }
 
-                Array.Copy(
-                    final, 0,
-                    _data, po,
-                    final.Length);
+                if (po < 0 || po > updatedData.Length - final.Length)
+                {
+                    throw new InvalidDataException(
+                        "GDTB palette range is outside the archive; no changes were written.");
+                }
+
+                Array.Copy(final, 0, updatedData, po, final.Length);
             }
 
-            Array.Copy(
-                pp, 0,
-                _data, tex.BodyOffset,
-                pp.Length);
+            if (tex.BodyOffset < 0 || pp.Length > updatedData.Length - tex.BodyOffset)
+            {
+                throw new InvalidDataException(
+                    "GDTB texture pixel range is outside the archive; no changes were written.");
+            }
 
-            SaveArchiveWithBackup(_data);
+            Array.Copy(pp, 0, updatedData, tex.BodyOffset, pp.Length);
+
+            // Commit to disk before updating the in-memory archive state.
+            SaveArchiveWithBackup(updatedData);
+            _data = updatedData;
 
             Console.WriteLine();
-            Console.ForegroundColor =
-                ConsoleColor.Green;
-            Console.WriteLine(
-                "[OK] Texture " + index +
-                " replaced in-place");
-            Console.WriteLine(
-                "     Saved: " + _filepath);
+            Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine("[OK] Texture " + index + " replaced in-place");
+            Console.WriteLine("     Saved: " + _filepath);
             Console.ResetColor();
         }
 
