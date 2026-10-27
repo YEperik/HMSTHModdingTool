@@ -5,59 +5,6 @@
 ### Originally HDATextTool by gdkchan
 ### Updated & Expanded by DarthKrayt333
 
----
-
-### Stability and workflow improvements (October 2026)
-
-- Interactive mode now exits cleanly when standard input reaches EOF instead of spinning indefinitely.
-- Command comparisons use invariant/culture-independent casing.
-- GLB writes use a temporary sibling file and atomic replacement so a failed export does not partially overwrite a prior result; the exporter also refuses to overwrite its source OBJ.
-- Added `obj2glb <input.obj> [output.glb]` to convert an already-extracted OBJ/MTL/texture set without re-running RDTB/SRDB extraction.
-- Added read-only `verify <archive>` validation for HDA, RDTB, GDTB, and SRDB, with optional JSON reports and offset/bounds diagnostics.
-- Destructive ISO/BIN and archive writes now stage a complete sibling output and retain a uniquely named backup when replacing an existing user file.
-- GDTB rebuilds now abort if any source texture cannot be decoded, rather than dropping a slot and shifting later texture indices.
-- Controls remapping validates all target bytes before mutating the image and rejects mixed or unknown patch states instead of silently applying a partial patch.
-- Raw 2352-byte ISO repair distinguishes Mode 1 payloads (offset 16) from Mode 2 Form 1 payloads (offset 24), and rejects Mode 2 Form 2 sectors when a 2048-byte ISO output is required.
-- `fixiso` attempts to roll back a BIN replacement if the matching CUE file cannot be installed. This does not provide a filesystem-wide transaction across arbitrary failures.
-- Generated Mode 2 Form 1 BIN sectors now use a shared encoder for the XA subheader, EDC, and P/Q ECC fields. The sector layout has source-level checks, but output still needs runtime comparison with known-good raw-sector images and target emulator/drive testing.
-
-
-### 3D model parser/export/import updates (October 2026)
-
-**Added**
-- Added `_all_obj/assembled_view/<base>_assembled.obj` plus MTL and copied textures. It is a viewer-oriented OBJ containing the primary/highest-detail LOD and all its material groups, including tool/item batches where present.
-- Added `primary_lod_only_export`, `primary_lod_chunk`, and `coordinate_scale` to `rebuild_manifest.json` so new exports keep the display LOD choice and auto-scale transform explicit for import.
-- Added `RDTB/ModelCommandHandler.cs` as the shared CLI entry point for `x3d`, `x3dglb`, `batch3d`, `c3d`, and `obj2glb`, keeping model argument parsing and orchestration out of `Program.cs`.
-- Added working `x3d split` export: it creates `<base>_obj` with numeric `model_NN.obj` files (and the BOY tools batch subfolder when applicable), texture slots, `_source.rdtb`, `_source.gdtb`, and `rebuild_manifest.json`.
-
-**Changed**
-- Combined model previews now select the lowest-index detected mesh LOD (normally chunk 11) when chunks 11/12/13 are all present, rather than stacking all LODs into the same visible mesh. Lower LOD chunk metadata remains in the manifest so the import path can synchronize matched siblings.
-- The previous artificial spread offsets are no longer applied to the assembled model view. Per-batch `xbatches` exports remain in their local/batch coordinate convention for round-trip editing.
-- GDTB creation orders `texture_N.bmp` numerically when all filenames use that convention. It rejects missing numeric slots rather than silently compacting and shifting texture IDs.
-- `x3d` and `x3dglb` now share argument parsing and the same model extraction routine; command-specific orchestration is moved out of `Program.cs`.
-- Added the missing `c3d` command dispatch so the documented model import path invokes `Model3D.Create` instead of falling through to the unknown-command handler. `c3d` supports `--scale` and one of `--small`, `--mirrored`, or `--big`; format conversion is verified before replacing the rebuilt RDTB, with the pre-conversion output retained as a backup.
-- Re-export refreshes `_source.rdtb`/`_source.gdtb` snapshots so a reused export folder cannot silently retain an earlier source archive.
-- RDTB format conversion validates its 14-slot pointer table before and after conversion. SMALL sentinel slots (9, 10, 12, 13) no longer terminate scans before slot 11; MIRRORED aliases remain aliases, and duplicated physical chunks are rebuilt only once.
-- Conversion methods validate expected source formats, stage intermediates at unique temporary paths, validate output format before installation, retain backup-aware output writes, and reject oversized in-memory conversion results before allocation.
-
-**Fixed**
-- Fixed small/embedded RDTB parsing: the normal stream is now read from the normal rows instead of duplicating position rows, with safe fallback normals only when needed.
-- Applied the same X-mirror flag handling to the main RDTB batch parser that was already used by the small parser.
-- Fixed numeric GDTB texture lookup (`texture_2` must remain ID 2 and never be confused with `texture_10`).
-- RDTB import/rebuild preserves all 14 logical pointer slots, SMALL `0xFFFFFFFF` sentinels and MIRRORED aliases; conflicting replacement payloads for aliased slots are rejected instead of silently choosing one.
-- Model command errors use the shared handler: invalid arguments, missing inputs, failed GLB validation, and failed model-format verification set a nonzero exit code without a misleading generic `[OK] Finished!` message.
-- New manifests record auto-scale; the importer reverses that export-only scale before applying the requested `c3d --scale` factor.
-- RDTB and GDTB archive outputs use backup-based replacement. If rebuilding imported textures fails, an existing output GDTB is preserved rather than overwritten with a fallback copy.
-
-**Optimized / maintainability**
-- Moved model file detection, `[split]` parsing, RDTB/SRDB branching, post-export texture fixing, OBJ-to-GLB conversion, batch export, and model import dispatch into `ModelCommandHandler.cs`; all five model CLI cases in `Program.cs` now delegate to this handler and suppress the generic completion message.
-- Expanded source-level regression checks for normal-stream parsing, LOD filtering, scale round-trip metadata, texture slot ordering, model command dispatch, RDTB pointer sentinels/aliases, and validated conversion outputs.
-
-**Known limitations**
-- These changes improve static mesh extraction and avoid obvious LOD duplication, but do not decode the complete PS2 skeleton rotation hierarchy, skin weights, or animation. The assembled body preview may therefore still differ from the in-game pose or exact relative world-space placement.
-- `x3d split` is an editable per-texture import folder. For the most granular edits (especially animated body/tool batches), `xbatches`/`cbatches` remains the safer workflow because it preserves per-batch centroids and handles each batch independently. The assembled view is kept in a subfolder so the importer does not accidentally load it as an editable source OBJ.
-- Re-exporting into an existing folder overwrites generated model files and refreshes source snapshots. Back up user-edited OBJ/texture files before re-exporting if they need to be retained.
-- Manifests created by older versions do not contain `coordinate_scale`; their original automatic export scale cannot be reconstructed reliably. Re-export with the current version before importing if the old model was automatically scaled.
 
 ## What is this?
 
