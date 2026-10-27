@@ -320,6 +320,57 @@ namespace HMSTHModdingTool.IO
             GameVersion version)
         {
             if (!File.Exists(isoPath))
+            {
+                throw new FileNotFoundException(
+                    "ISO file not found", isoPath);
+            }
+
+            string temporaryPath =
+                SafeFileReplacement.CreateTemporarySiblingPath(isoPath);
+            try
+            {
+                long originalLength = new FileInfo(isoPath).Length;
+                File.Copy(isoPath, temporaryPath);
+                long copiedLength = new FileInfo(temporaryPath).Length;
+                if (copiedLength != originalLength)
+                {
+                    throw new IOException(
+                        "Temporary ISO copy size mismatch. Expected " + originalLength +
+                        " bytes but copied " + copiedLength + " bytes.");
+                }
+
+                int changes = FixLbaInPlace(temporaryPath, version);
+                if (changes == 0)
+                    return 0;
+
+                if (SafeFileReplacement.IsTemporarySiblingPath(isoPath))
+                {
+                    SafeFileReplacement.ReplaceTemporaryFileWithoutBackup(
+                        temporaryPath, isoPath);
+                    TextOut.PrintSuccess(
+                        "LBA table patched in the temporary working image.");
+                }
+                else
+                {
+                    string backupPath =
+                        SafeFileReplacement.ReplaceExistingWithBackup(
+                            temporaryPath, isoPath);
+                    TextOut.PrintSuccess(
+                        "LBA table patched; original preserved as backup: " + backupPath);
+                }
+                return changes;
+            }
+            finally
+            {
+                SafeFileReplacement.TryDeleteTemporaryFile(temporaryPath);
+            }
+        }
+
+        private static int FixLbaInPlace(
+            string isoPath,
+            GameVersion version)
+        {
+            if (!File.Exists(isoPath))
                 throw new
                     FileNotFoundException(
                     "ISO file not found",
@@ -638,11 +689,9 @@ namespace HMSTHModdingTool.IO
                         " failed");
             }
 
-            TextOut.PrintSuccess(
-                "LBA table patched" +
-                " - " +
-                $"{diffCount}" +
-                " entries updated");
+            TextOut.Print(
+                "Verified LBA table patch in the temporary image: " +
+                diffCount + " entries updated.");
             return diffCount;
         }
 
