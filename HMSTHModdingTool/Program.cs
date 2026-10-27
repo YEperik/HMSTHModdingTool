@@ -2124,14 +2124,8 @@ namespace HMSTHModdingTool
                                             Console.WriteLine("  Sectors: " + numSec.ToString("N0"));
                                             Console.WriteLine("  BIN size: " + binSize.ToString("N0") + " bytes");
 
-                                            byte[] sync = new byte[]
-                                            {
-                                                0x00, 0xFF, 0xFF, 0xFF,
-                                                0xFF, 0xFF, 0xFF, 0xFF,
-                                                0xFF, 0xFF, 0xFF, 0x00
-                                            };
-                                            byte[] userData = new byte[2048];
-                                            byte[] sectorBuffer = new byte[2352];
+                                            byte[] userData = new byte[CdRomSectorEncoder.UserDataSize];
+                                            byte[] sectorBuffer = new byte[CdRomSectorEncoder.RawSectorSize];
 
                                             using (var destination = new FileStream(
                                                 binTemporaryPath,
@@ -2145,32 +2139,11 @@ namespace HMSTHModdingTool
                                                 {
                                                     SafeFileReplacement.ReadExactly(
                                                         source, userData, userData.Length);
-                                                    Array.Clear(sectorBuffer, 0, sectorBuffer.Length);
-                                                    Array.Copy(sync, 0, sectorBuffer, 0, sync.Length);
-
-                                                    long lba = sector + 150;
-                                                    long minute = lba / (60 * 75);
-                                                    long second = (lba / 75) % 60;
-                                                    long frame = lba % 75;
-
-                                                    sectorBuffer[12] = (byte)(((minute / 10) << 4) | (minute % 10));
-                                                    sectorBuffer[13] = (byte)(((second / 10) << 4) | (second % 10));
-                                                    sectorBuffer[14] = (byte)(((frame / 10) << 4) | (frame % 10));
-                                                    sectorBuffer[15] = 0x02;
-
-                                                    sectorBuffer[16] = 0x00;
-                                                    sectorBuffer[17] = 0x00;
-                                                    sectorBuffer[18] = 0x08;
-                                                    sectorBuffer[19] = 0x00;
-                                                    sectorBuffer[20] = 0x00;
-                                                    sectorBuffer[21] = 0x00;
-                                                    sectorBuffer[22] = 0x08;
-                                                    sectorBuffer[23] = 0x00;
-
-                                                    Array.Copy(
-                                                        userData, 0,
-                                                        sectorBuffer, 24,
-                                                        userData.Length);
+                                                    CdRomSectorEncoder.EncodeMode2Form1(
+                                                        sectorBuffer,
+                                                        userData,
+                                                        0,
+                                                        sector);
                                                     destination.Write(
                                                         sectorBuffer, 0,
                                                         sectorBuffer.Length);
