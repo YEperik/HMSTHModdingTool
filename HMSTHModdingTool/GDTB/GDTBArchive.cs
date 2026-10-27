@@ -1,4 +1,4 @@
-﻿using HMSTHModdingTool.BMP;
+using HMSTHModdingTool.BMP;
 using HMSTHModdingTool.IO;
 using System;
 using System.Collections.Generic;
@@ -764,6 +764,17 @@ namespace HMSTHModdingTool.GDTB
             };
         }
 
+        private void SaveArchiveWithBackup(byte[] data)
+        {
+            string backupPath =
+                SafeFileReplacement.WriteAllBytesWithBackup(_filepath, data);
+            if (!string.IsNullOrEmpty(backupPath))
+            {
+                Console.WriteLine(
+                    "Original GDTB preserved as backup: " + backupPath);
+            }
+        }
+
         // ═════════════════════════════════════════
         // LOAD ALL RAW TEXTURES
         // ═════════════════════════════════════════
@@ -797,14 +808,18 @@ namespace HMSTHModdingTool.GDTB
                         Palette = pal,
                     });
                 }
+                catch (OutOfMemoryException)
+                {
+                    throw;
+                }
                 catch (Exception e)
                 {
-                    Console.ForegroundColor =
-                        ConsoleColor.Yellow;
-                    Console.WriteLine(
-                        "[!] Warning texture " +
-                        i + ": " + e.Message);
-                    Console.ResetColor();
+                    // Do not omit a failed texture from the list: doing so
+                    // shifts every subsequent texture index during rebuild.
+                    throw new InvalidDataException(
+                        "Unable to read GDTB texture at original index " +
+                        i + "; rebuild was cancelled to preserve slot alignment.",
+                        e);
                 }
             }
 
@@ -950,7 +965,7 @@ namespace HMSTHModdingTool.GDTB
                 _data, tex.BodyOffset,
                 pp.Length);
 
-            File.WriteAllBytes(_filepath, _data);
+            SaveArchiveWithBackup(_data);
 
             Console.WriteLine();
             Console.ForegroundColor =
@@ -1006,7 +1021,7 @@ namespace HMSTHModdingTool.GDTB
             byte[] newData = BuildGDTB(allTex);
             int oldSize = _data.Length;
 
-            File.WriteAllBytes(_filepath, newData);
+            SaveArchiveWithBackup(newData);
             _data = newData;
 
             Console.WriteLine();
@@ -1192,7 +1207,7 @@ namespace HMSTHModdingTool.GDTB
             byte[] newData = BuildGDTB(allTex);
             int oldSize = _data.Length;
 
-            File.WriteAllBytes(_filepath, newData);
+            SaveArchiveWithBackup(newData);
             _data = newData;
 
             Console.WriteLine();
@@ -1347,7 +1362,7 @@ namespace HMSTHModdingTool.GDTB
             byte[] newData = BuildGDTB(allTex);
             int oldSize = _data.Length;
 
-            File.WriteAllBytes(_filepath, newData);
+            SaveArchiveWithBackup(newData);
             _data = newData;
             _originalCount = newCount;
             _textureCount = allTex.Count;
