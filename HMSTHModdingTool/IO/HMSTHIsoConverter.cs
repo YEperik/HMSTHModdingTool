@@ -94,60 +94,35 @@ namespace HMSTHModdingTool
             long size,
             string what)
         {
+            if (size < 0)
+                throw new ArgumentOutOfRangeException("size");
+
+            if (size > int.MaxValue)
+            {
+                Console.Error.WriteLine();
+                Console.Error.WriteLine("Conversion cannot allocate " + what +
+                    " because the requested contiguous buffer is " +
+                    size.ToString("N0") + " bytes, above the current byte[] limit.");
+                Console.Error.WriteLine(
+                    "This conversion path builds the entire output in memory; " +
+                    "switching to 64-bit alone will not fix this limit. " +
+                    "A streaming file-backed conversion path is required for this image size.");
+                return null;
+            }
+
             try
             {
-                if (size > int.MaxValue)
-                {
-                    throw new
-                        OutOfMemoryException(
-                        $"{what}: size " +
-                        $"{size:N0} exceeds" +
-                        " 2GB limit");
-                }
-                return new byte[size];
+                return new byte[(int)size];
             }
             catch (OutOfMemoryException)
             {
-                Console.WriteLine();
-                Console.ForegroundColor =
-                    ConsoleColor.Red;
-                Console.WriteLine(
-                    "═══════════════════" +
-                    "═══════════════════");
-                Console.WriteLine(
-                    " OUT OF MEMORY!");
-                Console.WriteLine(
-                    "═══════════════════" +
-                    "═══════════════════");
-                Console.ResetColor();
-                Console.ForegroundColor =
-                    ConsoleColor.Yellow;
-                Console.WriteLine(
-                    $"  Cannot allocate " +
-                    $"{size:N0} bytes " +
-                    $"for {what}");
-                Console.WriteLine();
-                Console.WriteLine(
-                    "  You are running in" +
-                    " 32-bit mode which is" +
-                    " limited to ~1.5GB.");
-                Console.WriteLine(
-                    "  DVD conversion needs" +
-                    " ~1.7GB of memory.");
-                Console.WriteLine();
-                Console.WriteLine(
-                    "  SOLUTIONS:");
-                Console.WriteLine(
-                    "  1. Run on 64-bit" +
-                    " Windows (recommended)");
-                Console.WriteLine(
-                    "  2. Set project to" +
-                    " x64 target");
-                Console.WriteLine(
-                    "  3. Close other apps" +
-                    " to free memory");
-                Console.ResetColor();
-                Console.WriteLine();
+                Console.Error.WriteLine();
+                Console.Error.WriteLine("Memory allocation failed for " + what +
+                    " (" + size.ToString("N0") + " bytes).");
+                Console.Error.WriteLine(
+                    "No output was produced. Freeing memory or using a 64-bit process " +
+                    "may help when the requested array is within the supported array size, " +
+                    "but does not remove the contiguous byte[] limit.");
                 return null;
             }
         }
@@ -427,29 +402,9 @@ namespace HMSTHModdingTool
                     $" ({numSec:N0}" +
                     " sectors)");
 
-                // Stream directly to file
-                // to avoid OOM on large DVDs
-                ConvertIsoToBinStream(
-                    output, outputPath);
-
-                // Write .cue file
-                string cuePath =
-                    Path.ChangeExtension(
-                        outputPath, ".cue");
-                string cueContent =
-                    "FILE \"" +
-                    Path.GetFileName(outputPath) +
-                    "\" BINARY\r\n" +
-                    "  TRACK 01 MODE2/2352\r\n" +
-                    "    INDEX 01 00:00:00\r\n";
-                string cueBackupPath =
-                    SafeFileReplacement.WriteAllTextWithBackup(
-                        cuePath, cueContent);
-                Console.WriteLine(
-                    "  Also created: " +
-                    Path.GetFileName(cuePath));
-                if (!string.IsNullOrEmpty(cueBackupPath))
-                    Console.WriteLine("  Previous CUE preserved as backup: " + cueBackupPath);
+                // Stage and commit BIN/CUE together so a CUE write failure
+                // cannot leave a new BIN paired with an old CUE.
+                ConvertIsoToBinCueStream(output, outputPath);
             }
             else
             {
@@ -2024,8 +1979,35 @@ namespace HMSTHModdingTool
             byte[] iso,
             string outputPath)
         {
+            string temporaryPath = WriteIsoToBinTemporary(iso, outputPath);
+            try
+            {
+                string backupPath = SafeFileReplacement.InstallWithBackup(
+                    temporaryPath, outputPath);
+                if (!string.IsNullOrEmpty(backupPath))
+                    Console.WriteLine("  Previous output preserved as backup: " + backupPath);
+            }
+            finally
+            {
+                SafeFileReplacement.TryDeleteTemporaryFile(temporaryPath);
+            }
+
+            Console.WriteLine();
+        }
+
+        /// <summary>
+        /// Creates a fully encoded and size-verified BIN in a registered
+        /// temporary sibling path. The caller owns commit/rollback and must
+        /// call TryDeleteTemporaryFile in a finally block.
+        /// </summary>
+        private static string WriteIsoToBinTemporary(
+            byte[] iso,
+            string outputPath)
+        {
             if (iso == null)
                 throw new ArgumentNullException("iso");
+            if (string.IsNullOrWhiteSpace(outputPath))
+                throw new ArgumentException("An output path is required.", "outputPath");
             if (iso.Length == 0 || iso.Length % SEC != 0)
             {
                 throw new InvalidDataException(
@@ -2033,20 +2015,13 @@ namespace HMSTHModdingTool
             }
 
             int numSec = iso.Length / SEC;
-            long expectedLength = checked((long)numSec * 2352L);
+            long expectedLength = checked((long)numSec * CdRomSectorEncoder.RawSectorSize);
             string temporaryPath =
                 SafeFileReplacement.CreateTemporarySiblingPath(outputPath);
 
             try
             {
-                byte[] sync = new byte[]
-                {
-                    0x00, 0xFF, 0xFF, 0xFF,
-                    0xFF, 0xFF, 0xFF, 0xFF,
-                    0xFF, 0xFF, 0xFF, 0x00
-                };
-
-                byte[] sectorBuffer = new byte[2352];
+                byte[] sectorBuffer = new byte[CdRomSectorEncoder.RawSectorSize];
                 using (var destination = new FileStream(
                     temporaryPath,
                     FileMode.CreateNew,
@@ -2057,32 +2032,11 @@ namespace HMSTHModdingTool
                 {
                     for (int sector = 0; sector < numSec; sector++)
                     {
-                        Array.Clear(sectorBuffer, 0, sectorBuffer.Length);
-                        Array.Copy(sync, 0, sectorBuffer, 0, sync.Length);
-
-                        int lba = sector + 150;
-                        int minute = lba / (60 * 75);
-                        int second = (lba / 75) % 60;
-                        int frame = lba % 75;
-
-                        sectorBuffer[12] = ToBcd(minute);
-                        sectorBuffer[13] = ToBcd(second);
-                        sectorBuffer[14] = ToBcd(frame);
-                        sectorBuffer[15] = 0x02;
-
-                        // Subheader Mode 2 Form 1, preserving the existing format.
-                        sectorBuffer[16] = 0x00;
-                        sectorBuffer[17] = 0x00;
-                        sectorBuffer[18] = 0x08;
-                        sectorBuffer[19] = 0x00;
-                        sectorBuffer[20] = 0x00;
-                        sectorBuffer[21] = 0x00;
-                        sectorBuffer[22] = 0x08;
-                        sectorBuffer[23] = 0x00;
-
-                        Array.Copy(
-                            iso, sector * SEC,
-                            sectorBuffer, 24, SEC);
+                        CdRomSectorEncoder.EncodeMode2Form1(
+                            sectorBuffer,
+                            iso,
+                            checked(sector * SEC),
+                            sector);
                         destination.Write(
                             sectorBuffer, 0, sectorBuffer.Length);
 
@@ -2106,24 +2060,113 @@ namespace HMSTHModdingTool
                         expectedLength + " bytes but wrote " + actualLength + " bytes.");
                 }
 
-                string backupPath = SafeFileReplacement.InstallWithBackup(
-                    temporaryPath, outputPath);
-                if (!string.IsNullOrEmpty(backupPath))
-                    Console.WriteLine("  Previous output preserved as backup: " + backupPath);
+                return temporaryPath;
+            }
+            catch
+            {
+                SafeFileReplacement.TryDeleteTemporaryFile(temporaryPath);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Generates BIN and CUE as a pair. Both are staged before the first
+        /// commit. If installing the CUE fails after BIN installation, the old
+        /// BIN is restored or the new unpaired BIN is preserved separately.
+        /// </summary>
+        private static void ConvertIsoToBinCueStream(
+            byte[] iso,
+            string outputPath)
+        {
+            string cuePath = Path.ChangeExtension(outputPath, ".cue");
+            string temporaryBinPath = WriteIsoToBinTemporary(iso, outputPath);
+            string temporaryCuePath = null;
+            string binBackupPath = null;
+            string cueBackupPath = null;
+            bool binCommitted = false;
+            bool cueCommitted = false;
+
+            try
+            {
+                string cueContent =
+                    "FILE \"" + Path.GetFileName(outputPath) + "\" BINARY\r\n" +
+                    "  TRACK 01 MODE2/2352\r\n" +
+                    "    INDEX 01 00:00:00\r\n";
+                temporaryCuePath =
+                    SafeFileReplacement.CreateTemporarySiblingPath(cuePath);
+
+                using (var cueStream = new FileStream(
+                    temporaryCuePath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None))
+                using (var cueWriter = new StreamWriter(
+                    cueStream,
+                    new System.Text.UTF8Encoding(false)))
+                {
+                    cueWriter.Write(cueContent);
+                    cueWriter.Flush();
+                }
+
+                binBackupPath = SafeFileReplacement.InstallWithBackup(
+                    temporaryBinPath, outputPath);
+                binCommitted = true;
+
+                cueBackupPath = SafeFileReplacement.InstallWithBackup(
+                    temporaryCuePath, cuePath);
+                cueCommitted = true;
+
+                Console.WriteLine();
+                Console.WriteLine("  BIN/CUE pair installed successfully.");
+                Console.WriteLine("  BIN: " + outputPath);
+                Console.WriteLine("  CUE: " + cuePath);
+                if (!string.IsNullOrEmpty(binBackupPath))
+                    Console.WriteLine("  Previous BIN preserved as backup: " + binBackupPath);
+                if (!string.IsNullOrEmpty(cueBackupPath))
+                    Console.WriteLine("  Previous CUE preserved as backup: " + cueBackupPath);
+            }
+            catch (Exception operationError)
+            {
+                if (binCommitted && !cueCommitted)
+                {
+                    try
+                    {
+                        string directory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+                        string unpairedPath = Path.Combine(
+                            directory,
+                            ".hmsth-unpaired-" + Guid.NewGuid().ToString("N") + ".bin");
+
+                        if (!string.IsNullOrEmpty(binBackupPath) && File.Exists(binBackupPath))
+                        {
+                            File.Replace(binBackupPath, outputPath, unpairedPath);
+                        }
+                        else if (File.Exists(outputPath))
+                        {
+                            File.Move(outputPath, unpairedPath);
+                        }
+
+                        Console.Error.WriteLine(
+                            "CUE installation failed; BIN target was rolled back. " +
+                            "The generated BIN, if present, was preserved at: " + unpairedPath);
+                    }
+                    catch (Exception rollbackError)
+                    {
+                        throw new IOException(
+                            "CUE installation failed and BIN rollback also failed. " +
+                            "Keep all remaining .hmsth-backup-* and output files for recovery. " +
+                            "Original error: " + operationError.Message +
+                            ". Rollback error: " + rollbackError.Message,
+                            new AggregateException(operationError, rollbackError));
+                    }
+                }
+                throw;
             }
             finally
             {
-                SafeFileReplacement.TryDeleteTemporaryFile(temporaryPath);
+                SafeFileReplacement.TryDeleteTemporaryFile(temporaryBinPath);
+                if (temporaryCuePath != null)
+                    SafeFileReplacement.TryDeleteTemporaryFile(temporaryCuePath);
             }
-
-            Console.WriteLine();
-        }
-
-        static byte ToBcd(int val)
-        {
-            return (byte)(
-                ((val / 10) << 4) |
-                (val % 10));
         }
 
         // ═══════════════════════════════════════
@@ -2456,28 +2499,8 @@ namespace HMSTHModdingTool
                     $" ({numSec:N0}" +
                     " sectors)");
 
-                // Stream directly to file
-                ConvertIsoToBinStream(
-                    iso2048, outputPath);
-
-                // Write .cue file
-                string cuePath =
-                            Path.ChangeExtension(
-                        outputPath, ".cue");
-                string cueContent =
-                    "FILE \"" +
-                    Path.GetFileName(outputPath) +
-                    "\" BINARY\r\n" +
-                    "  TRACK 01 MODE2/2352\r\n" +
-                    "    INDEX 01 00:00:00\r\n";
-                string cueBackupPath =
-                    SafeFileReplacement.WriteAllTextWithBackup(
-                        cuePath, cueContent);
-                Console.WriteLine(
-                    "  Also created: " +
-                    Path.GetFileName(cuePath));
-                if (!string.IsNullOrEmpty(cueBackupPath))
-                    Console.WriteLine("  Previous CUE preserved as backup: " + cueBackupPath);
+                // Commit the raw image and its descriptor as one logical pair.
+                ConvertIsoToBinCueStream(iso2048, outputPath);
             }
             else
             {
