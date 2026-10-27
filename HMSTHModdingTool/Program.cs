@@ -698,8 +698,85 @@ namespace HMSTHModdingTool
         // ═════════════════════════════════════
         // RUN COMMAND
         // ═════════════════════════════════════
+        static bool HasValidIso2048PrimaryVolumeDescriptor(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return false;
+
+            const int sectorSize = 2048;
+            const long primaryVolumeDescriptorOffset = 16L * sectorSize;
+            byte[] descriptorSignature = new byte[6];
+
+            using (var source = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                4096,
+                FileOptions.SequentialScan))
+            {
+                if (source.Length < primaryVolumeDescriptorOffset + descriptorSignature.Length)
+                    return false;
+
+                source.Position = primaryVolumeDescriptorOffset;
+                SafeFileReplacement.ReadExactly(
+                    source, descriptorSignature, descriptorSignature.Length);
+            }
+
+            // ISO 9660 Primary Volume Descriptor: type 1 followed by "CD001".
+            return descriptorSignature[0] == 0x01 &&
+                descriptorSignature[1] == (byte)'C' &&
+                descriptorSignature[2] == (byte)'D' &&
+                descriptorSignature[3] == (byte)'0' &&
+                descriptorSignature[4] == (byte)'0' &&
+                descriptorSignature[5] == (byte)'1';
+        }
+
+        static bool HasValidRaw2352SyncPattern(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+                return false;
+
+            byte[] sync = new byte[12];
+            using (var source = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                4096,
+                FileOptions.SequentialScan))
+            {
+                if (source.Length < sync.Length)
+                    return false;
+
+                SafeFileReplacement.ReadExactly(source, sync, sync.Length);
+            }
+
+            if (sync[0] != 0x00 || sync[11] != 0x00)
+                return false;
+
+            for (int i = 1; i < 11; i++)
+            {
+                if (sync[i] != 0xFF)
+                    return false;
+            }
+
+            return true;
+        }
+
         static void RunCommand(string[] args)
         {
+            // Each command reports its own process result. Reset this here so
+            // an earlier interactive command cannot leak its exit status.
+            Environment.ExitCode = 0;
+
+            if (args == null || args.Length == 0)
+            {
+                Console.WriteLine("A command is required. Type 'help' to see available commands.");
+                Environment.ExitCode = 1;
+                return;
+            }
+
             try
             {
                 string cmd =
@@ -1502,7 +1579,12 @@ namespace HMSTHModdingTool
                                 gv = AutoDetectFromIso(
                                     isoPath,
                                     out aborted);
-                                if (aborted) return;
+                                if (aborted)
+                                {
+                                    Environment.ExitCode = 1;
+                                    customFinish = true;
+                                    return;
+                                }
                             }
 
                             string elfName;
@@ -1586,6 +1668,7 @@ namespace HMSTHModdingTool
                         RequireArgs(args, 2,
                             "-fixisoonly <file.iso>");
                         {
+                            bool fixIsoOnlyHadErrors = false;
                             string isoPath = args[1];
                             if (!Path.IsPathRooted(isoPath))
                                 isoPath = Path.Combine(
@@ -1620,7 +1703,12 @@ namespace HMSTHModdingTool
                                 AutoDetectFromIso(
                                     isoPath,
                                     out aborted);
-                            if (aborted) break;
+                            if (aborted)
+                            {
+                                Environment.ExitCode = 1;
+                                customFinish = true;
+                                break;
+                            }
 
                             Console.ForegroundColor =
                                 ConsoleColor.Cyan;
@@ -1662,6 +1750,7 @@ namespace HMSTHModdingTool
                                 }
                                 catch (Exception ex)
                                 {
+                                    fixIsoOnlyHadErrors = true;
                                     Console.ForegroundColor =
                                         ConsoleColor.Yellow;
                                     Console.WriteLine(
@@ -1699,6 +1788,7 @@ namespace HMSTHModdingTool
                             }
                             catch (Exception ex)
                             {
+                                fixIsoOnlyHadErrors = true;
                                 Console.ForegroundColor =
                                     ConsoleColor.Yellow;
                                 Console.WriteLine(
@@ -1708,24 +1798,35 @@ namespace HMSTHModdingTool
                             }
 
                             Console.WriteLine();
-                            Console.ForegroundColor =
-                                ConsoleColor.Green;
-                            Console.WriteLine(
-                                "═══════════════════" +
-                                "═══════════════════");
-                            Console.WriteLine(
-                                " ALL DONE! Image is" +
-                                " ready to play.");
-                            Console.WriteLine(
-                                "═══════════════════" +
-                                "═══════════════════");
-                            Console.ResetColor();
+                            if (fixIsoOnlyHadErrors)
+                            {
+                                Console.ForegroundColor = ConsoleColor.Yellow;
+                                Console.WriteLine(" FIXISOONLY completed with warnings; not all steps succeeded.");
+                                Console.ResetColor();
+                                Environment.ExitCode = 1;
+                                customFinish = true;
+                            }
+                            else
+                            {
+                                Console.ForegroundColor = ConsoleColor.Green;
+                                Console.WriteLine(
+                                    "═══════════════════" +
+                                    "═══════════════════");
+                                Console.WriteLine(
+                                    " ALL DONE! Image is" +
+                                    " ready to play.");
+                                Console.WriteLine(
+                                    "═══════════════════" +
+                                    "═══════════════════");
+                                Console.ResetColor();
+                            }
                             Console.WriteLine();
                         }
                         break;
 
                     case "fixiso":
                         {
+                            bool fixIsoHadErrors = false;
                             int flagIdx;
                             GameVersion gv =
                                 DetectVersionFlag(
@@ -1761,7 +1862,12 @@ namespace HMSTHModdingTool
                                 bool aborted;
                                 gv = AutoDetectFromIso(
                                     isoPath, out aborted);
-                                if (aborted) return;
+                                if (aborted)
+                                {
+                                    Environment.ExitCode = 1;
+                                    customFinish = true;
+                                    return;
+                                }
                             }
 
                             string elfName;
@@ -1842,6 +1948,7 @@ namespace HMSTHModdingTool
                                 }
                                 catch (Exception ex)
                                 {
+                                    fixIsoHadErrors = true;
                                     Console.ForegroundColor =
                                         ConsoleColor.Yellow;
                                     Console.WriteLine(
@@ -1880,6 +1987,7 @@ namespace HMSTHModdingTool
                             }
                             catch (Exception ex)
                             {
+                                fixIsoHadErrors = true;
                                 Console.ForegroundColor =
                                     ConsoleColor.Yellow;
                                 Console.WriteLine(
@@ -1927,6 +2035,7 @@ namespace HMSTHModdingTool
                             }
                             catch (Exception ex)
                             {
+                                fixIsoHadErrors = true;
                                 Console.ForegroundColor =
                                     ConsoleColor.Yellow;
                                 Console.WriteLine(
@@ -1943,17 +2052,25 @@ namespace HMSTHModdingTool
                                 .GetExtension(isoPath)
                                 .ToLower();
 
-                            if (ext == ".bin" || ext == ".raw")
+                            if (ext == ".bin" || ext == ".raw" || ext == ".iso" || ext == ".img")
                             {
                                 // Check if file is currently
                                 // 2048-sector format
                                 long fSize = new FileInfo(
                                     isoPath).Length;
                                 bool isCurrentlyIso =
+                                    fSize > 0 &&
                                     (fSize % 2048 == 0) &&
-                                    (fSize % 2352 != 0);
+                                    HasValidIso2048PrimaryVolumeDescriptor(isoPath);
+                                bool isCurrentlyBin =
+                                    fSize > 0 &&
+                                    (fSize % 2352 == 0) &&
+                                    HasValidRaw2352SyncPattern(isoPath);
+                                bool isBinOrRawPath =
+                                    string.Equals(ext, ".bin", StringComparison.OrdinalIgnoreCase) ||
+                                    string.Equals(ext, ".raw", StringComparison.OrdinalIgnoreCase);
 
-                                if (isCurrentlyIso)
+                                if (isBinOrRawPath && isCurrentlyIso)
                                 {
                                     Console.WriteLine();
                                     Console.ForegroundColor =
@@ -1967,180 +2084,257 @@ namespace HMSTHModdingTool
                                         " BIN/CUE format...");
                                     Console.ResetColor();
 
+                                    string binTemporaryPath =
+                                        SafeFileReplacement.CreateTemporarySiblingPath(isoPath);
+                                    string cuePath = Path.ChangeExtension(isoPath, ".cue");
+                                    string cueTemporaryPath = null;
+                                    string binBackupPath = null;
+                                    string cueBackupPath = null;
+                                    bool binCommitted = false;
+                                    bool cueCommitted = false;
                                     try
                                     {
-                                        // Read the ISO data
-                                        byte[] isoData =
-                                            File.ReadAllBytes(
-                                                isoPath);
-
-                                        // Convert to BIN using
-                                        // HMSTHIsoConverter's
-                                        // streaming method
-                                        int numSec =
-                                            (int)(fSize / 2048);
-                                        long binSize =
-                                            (long)numSec * 2352;
-
-                                        Console.WriteLine(
-                                            $"  Sectors: " +
-                                            $"{numSec:N0}");
-                                        Console.WriteLine(
-                                            $"  BIN size: " +
-                                            $"{binSize:N0}" +
-                                            " bytes");
-
-                                        byte[] sync = new byte[]
+                                        if (!HasValidIso2048PrimaryVolumeDescriptor(isoPath))
                                         {
-                                            0x00, 0xFF, 0xFF, 0xFF,
-                                            0xFF, 0xFF, 0xFF, 0xFF,
-                                            0xFF, 0xFF, 0xFF, 0x00
-                                        };
+                                            throw new InvalidDataException(
+                                                "The file has a 2048-byte-sector size pattern but no verified CD001 primary volume descriptor; BIN/CUE conversion was cancelled.");
+                                        }
 
-                                        byte[] secBuf =
-                                            new byte[2352];
+                                        long numSec;
+                                        long binSize;
 
-                                        // Delete old file first
-                                        File.Delete(isoPath);
+                                        using (var source = new FileStream(
+                                            isoPath,
+                                            FileMode.Open,
+                                            FileAccess.Read,
+                                            FileShare.Read,
+                                            65536,
+                                            FileOptions.SequentialScan))
+                                        {
+                                            long sourceLength = source.Length;
+                                            if (sourceLength == 0 || sourceLength % 2048 != 0)
+                                            {
+                                                throw new InvalidDataException(
+                                                    "The source is not a complete 2048-byte-sector ISO.");
+                                            }
 
-                                        using (var fs =
-                                            new FileStream(
-                                                isoPath,
-                                                FileMode.Create,
+                                            numSec = sourceLength / 2048;
+                                            binSize = checked(numSec * 2352L);
+
+                                            Console.WriteLine("  Sectors: " + numSec.ToString("N0"));
+                                            Console.WriteLine("  BIN size: " + binSize.ToString("N0") + " bytes");
+
+                                            byte[] sync = new byte[]
+                                            {
+                                                0x00, 0xFF, 0xFF, 0xFF,
+                                                0xFF, 0xFF, 0xFF, 0xFF,
+                                                0xFF, 0xFF, 0xFF, 0x00
+                                            };
+                                            byte[] userData = new byte[2048];
+                                            byte[] sectorBuffer = new byte[2352];
+
+                                            using (var destination = new FileStream(
+                                                binTemporaryPath,
+                                                FileMode.CreateNew,
                                                 FileAccess.Write,
                                                 FileShare.None,
-                                                65536))
-                                        {
-                                            for (int s = 0;
-                                                 s < numSec; s++)
+                                                65536,
+                                                FileOptions.SequentialScan))
                                             {
-                                                Array.Clear(
-                                                    secBuf, 0,
-                                                    2352);
-
-                                                Array.Copy(sync, 0,
-                                                    secBuf, 0, 12);
-
-                                                int lba = s + 150;
-                                                int minute =
-                                                    lba / (60 * 75);
-                                                int second =
-                                                    (lba / 75) % 60;
-                                                int frame =
-                                                    lba % 75;
-
-                                                secBuf[12] = (byte)(
-                                                    ((minute / 10) << 4) |
-                                                    (minute % 10));
-                                                secBuf[13] = (byte)(
-                                                    ((second / 10) << 4) |
-                                                    (second % 10));
-                                                secBuf[14] = (byte)(
-                                                    ((frame / 10) << 4) |
-                                                    (frame % 10));
-                                                secBuf[15] = 0x02;
-
-                                                // Subheader
-                                                secBuf[16] = 0x00;
-                                                secBuf[17] = 0x00;
-                                                secBuf[18] = 0x08;
-                                                secBuf[19] = 0x00;
-                                                secBuf[20] = 0x00;
-                                                secBuf[21] = 0x00;
-                                                secBuf[22] = 0x08;
-                                                secBuf[23] = 0x00;
-
-                                                Array.Copy(
-                                                    isoData,
-                                                    s * 2048,
-                                                    secBuf, 24,
-                                                    2048);
-
-                                                fs.Write(
-                                                    secBuf, 0,
-                                                    2352);
-
-                                                if (s % 50000 == 0
-                                                    && s > 0)
+                                                for (long sector = 0; sector < numSec; sector++)
                                                 {
-                                                    double pct =
-                                                        (double)s /
-                                                        numSec *
-                                                        100.0;
-                                                    Console.Write(
-                                                        $"\r  " +
-                                                        $"Writing" +
-                                                        $" BIN: " +
-                                                        $"{pct:F1}%");
+                                                    SafeFileReplacement.ReadExactly(
+                                                        source, userData, userData.Length);
+                                                    Array.Clear(sectorBuffer, 0, sectorBuffer.Length);
+                                                    Array.Copy(sync, 0, sectorBuffer, 0, sync.Length);
+
+                                                    long lba = sector + 150;
+                                                    long minute = lba / (60 * 75);
+                                                    long second = (lba / 75) % 60;
+                                                    long frame = lba % 75;
+
+                                                    sectorBuffer[12] = (byte)(((minute / 10) << 4) | (minute % 10));
+                                                    sectorBuffer[13] = (byte)(((second / 10) << 4) | (second % 10));
+                                                    sectorBuffer[14] = (byte)(((frame / 10) << 4) | (frame % 10));
+                                                    sectorBuffer[15] = 0x02;
+
+                                                    sectorBuffer[16] = 0x00;
+                                                    sectorBuffer[17] = 0x00;
+                                                    sectorBuffer[18] = 0x08;
+                                                    sectorBuffer[19] = 0x00;
+                                                    sectorBuffer[20] = 0x00;
+                                                    sectorBuffer[21] = 0x00;
+                                                    sectorBuffer[22] = 0x08;
+                                                    sectorBuffer[23] = 0x00;
+
+                                                    Array.Copy(
+                                                        userData, 0,
+                                                        sectorBuffer, 24,
+                                                        userData.Length);
+                                                    destination.Write(
+                                                        sectorBuffer, 0,
+                                                        sectorBuffer.Length);
+
+                                                    if (sector > 0 && sector % 50000 == 0)
+                                                    {
+                                                        double percentage =
+                                                            (double)sector / numSec * 100.0;
+                                                        Console.Write(
+                                                            "\r  Writing BIN: {0:F1}%",
+                                                            percentage);
+                                                    }
                                                 }
+                                                destination.Flush();
                                             }
                                         }
 
-                                        Console.WriteLine();
+                                        long convertedLength = new FileInfo(binTemporaryPath).Length;
+                                        if (convertedLength != binSize)
+                                        {
+                                            throw new IOException(
+                                                "Converted BIN size mismatch. Expected " +
+                                                binSize + " bytes but wrote " + convertedLength + " bytes.");
+                                        }
 
-                                        // Also create .cue file
-                                        string cuePath =
-                                            Path.ChangeExtension(
-                                                isoPath, ".cue");
                                         string cueContent =
-                                            "FILE \"" +
-                                            Path.GetFileName(
-                                                isoPath) +
-                                            "\" BINARY\r\n" +
-                                            "  TRACK 01" +
-                                            " MODE1/2352\r\n" +
-                                            "    INDEX 01" +
-                                            " 00:00:00\r\n";
-                                        File.WriteAllText(
-                                            cuePath,
-                                            cueContent);
+                                            "FILE \"" + Path.GetFileName(isoPath) + "\" BINARY\r\n" +
+                                            "  TRACK 01 MODE2/2352\r\n" +
+                                            "    INDEX 01 00:00:00\r\n";
+                                        cueTemporaryPath =
+                                            SafeFileReplacement.CreateTemporarySiblingPath(cuePath);
+                                        using (var cueStream = new FileStream(
+                                            cueTemporaryPath,
+                                            FileMode.CreateNew,
+                                            FileAccess.Write,
+                                            FileShare.None))
+                                        using (var cueWriter = new StreamWriter(
+                                            cueStream,
+                                            new System.Text.UTF8Encoding(false)))
+                                        {
+                                            cueWriter.Write(cueContent);
+                                        }
 
-                                        Console.ForegroundColor =
-                                            ConsoleColor.Green;
-                                        Console.WriteLine(
-                                            "  BIN/CUE created!");
-                                        Console.WriteLine(
-                                            "  Also created: " +
-                                            Path.GetFileName(
-                                                cuePath));
+                                        // Replace only after both temporary outputs are complete.
+                                        binBackupPath = SafeFileReplacement.ReplaceExistingWithBackup(
+                                            binTemporaryPath, isoPath);
+                                        binCommitted = true;
+                                        cueBackupPath = SafeFileReplacement.InstallWithBackup(
+                                            cueTemporaryPath, cuePath);
+                                        cueCommitted = true;
+
+                                        Console.WriteLine();
+                                        Console.ForegroundColor = ConsoleColor.Green;
+                                        Console.WriteLine("  BIN/CUE created!");
+                                        Console.WriteLine("  Created: " + Path.GetFileName(cuePath));
                                         Console.ResetColor();
+                                        Console.WriteLine("  Original image preserved as backup: " + binBackupPath);
+                                        if (!string.IsNullOrEmpty(cueBackupPath))
+                                            Console.WriteLine("  Previous CUE preserved as backup: " + cueBackupPath);
                                     }
                                     catch (Exception ex)
                                     {
+                                        fixIsoHadErrors = true;
+                                        Environment.ExitCode = 1;
+                                        customFinish = true;
                                         Console.ForegroundColor =
                                             ConsoleColor.Yellow;
                                         Console.WriteLine(
                                             "  Step 4 warning: " +
                                             ex.Message);
                                         Console.ResetColor();
+
+                                        // BIN and CUE form one logical output. If BIN was
+                                        // installed but CUE was not, restore the original
+                                        // image and preserve the unpaired new BIN separately.
+                                        if (binCommitted && !cueCommitted &&
+                                            !string.IsNullOrEmpty(binBackupPath))
+                                        {
+                                            string rollbackBackupPath = Path.Combine(
+                                                Path.GetDirectoryName(isoPath),
+                                                ".hmsth-backup-rollback-" +
+                                                Guid.NewGuid().ToString("N") + ".bak");
+                                            try
+                                            {
+                                                File.Replace(
+                                                    binBackupPath,
+                                                    isoPath,
+                                                    rollbackBackupPath);
+                                                Console.WriteLine(
+                                                    "  BIN commit rolled back because the CUE could not be installed.");
+                                                Console.WriteLine(
+                                                    "  Newly generated BIN preserved as backup: " + rollbackBackupPath);
+                                                binBackupPath = null;
+                                            }
+                                            catch (Exception rollbackException)
+                                            {
+                                                Console.WriteLine(
+                                                    "  WARNING: BIN rollback failed. Original image backup remains at: " +
+                                                    binBackupPath);
+                                                Console.WriteLine(
+                                                    "  Rollback error: " + rollbackException.Message);
+                                            }
+                                        }
+
+                                        if (!string.IsNullOrEmpty(binBackupPath))
+                                            Console.WriteLine("  Original image preserved as backup: " + binBackupPath);
+                                        if (!string.IsNullOrEmpty(cueBackupPath))
+                                            Console.WriteLine("  Previous CUE preserved as backup: " + cueBackupPath);
+                                    }
+                                    finally
+                                    {
+                                        SafeFileReplacement.TryDeleteTemporaryFile(binTemporaryPath);
+                                        SafeFileReplacement.TryDeleteTemporaryFile(cueTemporaryPath);
                                     }
                                 }
                                 else
                                 {
                                     Console.WriteLine();
-                                    Console.ForegroundColor =
-                                        ConsoleColor.DarkGray;
-                                    Console.WriteLine(
-                                        "[STEP 4/4] File is" +
-                                        " already in BIN format" +
-                                        " - no conversion needed.");
+                                    Console.ForegroundColor = ConsoleColor.DarkGray;
+                                    if (!isBinOrRawPath)
+                                    {
+                                        Console.WriteLine(
+                                            "[STEP 4/4] Skipping BIN/CUE conversion because the input extension is not .bin or .raw.");
+                                    }
+                                    else if (isCurrentlyBin)
+                                    {
+                                        Console.WriteLine(
+                                            "[STEP 4/4] Verified 2352-byte BIN/RAW image; no BIN/CUE conversion needed.");
+                                    }
+                                    else
+                                    {
+                                        Console.WriteLine(
+                                            "[STEP 4/4] The .bin/.raw input is not a verified 2048-byte ISO or 2352-byte BIN/RAW; conversion was not performed.");
+                                        fixIsoHadErrors = true;
+                                        Environment.ExitCode = 1;
+                                        customFinish = true;
+                                    }
                                     Console.ResetColor();
                                 }
                             }
 
                             Console.WriteLine();
-                            Console.ForegroundColor =
-                                ConsoleColor.Green;
-                            Console.WriteLine(
-                                "═══════════════════" +
-                                "═══════════════════");
-                            Console.WriteLine(
-                                " ALL DONE! Image is" +
-                                " ready to play.");
-                            Console.WriteLine(
-                                "═══════════════════" +
-                                "═══════════════════");
-                            Console.ResetColor();
+                            if (fixIsoHadErrors)
+                            {
+                                Console.ForegroundColor = ConsoleColor.Yellow;
+                                Console.WriteLine(" FIXISO completed with warnings; not all steps succeeded.");
+                                Console.ResetColor();
+                                Environment.ExitCode = 1;
+                                customFinish = true;
+                            }
+                            else
+                            {
+                                Console.ForegroundColor = ConsoleColor.Green;
+                                Console.WriteLine(
+                                    "═══════════════════" +
+                                    "═══════════════════");
+                                Console.WriteLine(
+                                    " ALL DONE! Image is" +
+                                    " ready to play.");
+                                Console.WriteLine(
+                                    "═══════════════════" +
+                                    "═══════════════════");
+                                Console.ResetColor();
+                            }
                         }
                         break;
 
@@ -2192,7 +2386,12 @@ namespace HMSTHModdingTool
                                 gv = AutoDetectFromIso(
                                     isoPath,
                                     out aborted);
-                                if (aborted) break;
+                                if (aborted)
+                                {
+                                    Environment.ExitCode = 1;
+                                    customFinish = true;
+                                    break;
+                                }
                             }
 
                             IsoLogoPatcher.PatchIso(
@@ -4091,6 +4290,7 @@ namespace HMSTHModdingTool
                             " see all commands.");
                         Console.ResetColor();
                         Console.WriteLine();
+                        Environment.ExitCode = 1;
                         return;
                 }
 
@@ -4100,6 +4300,7 @@ namespace HMSTHModdingTool
             }
             catch (FileNotFoundException e)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
@@ -4111,6 +4312,7 @@ namespace HMSTHModdingTool
             }
             catch (DirectoryNotFoundException)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
@@ -4121,6 +4323,7 @@ namespace HMSTHModdingTool
             }
             catch (UnauthorizedAccessException)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 Console.ForegroundColor =
                     ConsoleColor.Blue;
@@ -4132,6 +4335,7 @@ namespace HMSTHModdingTool
             }
             catch (ArgumentException e)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 string msg = e.Message;
                 if (msg.Contains(
@@ -4165,6 +4369,7 @@ namespace HMSTHModdingTool
             }
             catch (InvalidDataException e)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
@@ -4176,6 +4381,7 @@ namespace HMSTHModdingTool
             }
             catch (FormatException)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
@@ -4186,6 +4392,7 @@ namespace HMSTHModdingTool
             }
             catch (IOException e)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
@@ -4197,6 +4404,7 @@ namespace HMSTHModdingTool
             }
             catch (Exception e)
             {
+                Environment.ExitCode = 1;
                 Console.WriteLine();
                 Console.ForegroundColor =
                     ConsoleColor.Yellow;
