@@ -1,4 +1,4 @@
-﻿﻿# HMSTHModdingTool
+# HMSTHModdingTool
 2026 UPDATED - HDA (un)packer and tool for modding in Harvest Moon: Save the Homeland - Original as HDATextTool made by gdkchan
 
 
@@ -14,7 +14,50 @@
 - GLB writes use a temporary sibling file and atomic replacement so a failed export does not partially overwrite a prior result; the exporter also refuses to overwrite its source OBJ.
 - Added `obj2glb <input.obj> [output.glb]` to convert an already-extracted OBJ/MTL/texture set without re-running RDTB/SRDB extraction.
 - Added read-only `verify <archive>` validation for HDA, RDTB, GDTB, and SRDB, with optional JSON reports and offset/bounds diagnostics.
+- Destructive ISO/BIN and archive writes now stage a complete sibling output and retain a uniquely named backup when replacing an existing user file.
+- GDTB rebuilds now abort if any source texture cannot be decoded, rather than dropping a slot and shifting later texture indices.
+- Controls remapping validates all target bytes before mutating the image and rejects mixed or unknown patch states instead of silently applying a partial patch.
+- Raw 2352-byte ISO repair distinguishes Mode 1 payloads (offset 16) from Mode 2 Form 1 payloads (offset 24), and rejects Mode 2 Form 2 sectors when a 2048-byte ISO output is required.
+- `fixiso` attempts to roll back a BIN replacement if the matching CUE file cannot be installed. This does not provide a filesystem-wide transaction across arbitrary failures.
+- Generated Mode 2 Form 1 BIN sectors now use a shared encoder for the XA subheader, EDC, and P/Q ECC fields. The sector layout has source-level checks, but output still needs runtime comparison with known-good raw-sector images and target emulator/drive testing.
 
+
+### 3D model parser/export/import updates (October 2026)
+
+**Added**
+- Added `_all_obj/assembled_view/<base>_assembled.obj` plus MTL and copied textures. It is a viewer-oriented OBJ containing the primary/highest-detail LOD and all its material groups, including tool/item batches where present.
+- Added `primary_lod_only_export`, `primary_lod_chunk`, and `coordinate_scale` to `rebuild_manifest.json` so new exports keep the display LOD choice and auto-scale transform explicit for import.
+- Added `RDTB/ModelCommandHandler.cs` as the shared CLI entry point for `x3d`, `x3dglb`, `batch3d`, `c3d`, and `obj2glb`, keeping model argument parsing and orchestration out of `Program.cs`.
+- Added working `x3d split` export: it creates `<base>_obj` with numeric `model_NN.obj` files (and the BOY tools batch subfolder when applicable), texture slots, `_source.rdtb`, `_source.gdtb`, and `rebuild_manifest.json`.
+
+**Changed**
+- Combined model previews now select the lowest-index detected mesh LOD (normally chunk 11) when chunks 11/12/13 are all present, rather than stacking all LODs into the same visible mesh. Lower LOD chunk metadata remains in the manifest so the import path can synchronize matched siblings.
+- The previous artificial spread offsets are no longer applied to the assembled model view. Per-batch `xbatches` exports remain in their local/batch coordinate convention for round-trip editing.
+- GDTB creation orders `texture_N.bmp` numerically when all filenames use that convention. It rejects missing numeric slots rather than silently compacting and shifting texture IDs.
+- `x3d` and `x3dglb` now share argument parsing and the same model extraction routine; command-specific orchestration is moved out of `Program.cs`.
+- Added the missing `c3d` command dispatch so the documented model import path invokes `Model3D.Create` instead of falling through to the unknown-command handler. `c3d` supports `--scale` and one of `--small`, `--mirrored`, or `--big`; format conversion is verified before replacing the rebuilt RDTB, with the pre-conversion output retained as a backup.
+- Re-export refreshes `_source.rdtb`/`_source.gdtb` snapshots so a reused export folder cannot silently retain an earlier source archive.
+- RDTB format conversion validates its 14-slot pointer table before and after conversion. SMALL sentinel slots (9, 10, 12, 13) no longer terminate scans before slot 11; MIRRORED aliases remain aliases, and duplicated physical chunks are rebuilt only once.
+- Conversion methods validate expected source formats, stage intermediates at unique temporary paths, validate output format before installation, retain backup-aware output writes, and reject oversized in-memory conversion results before allocation.
+
+**Fixed**
+- Fixed small/embedded RDTB parsing: the normal stream is now read from the normal rows instead of duplicating position rows, with safe fallback normals only when needed.
+- Applied the same X-mirror flag handling to the main RDTB batch parser that was already used by the small parser.
+- Fixed numeric GDTB texture lookup (`texture_2` must remain ID 2 and never be confused with `texture_10`).
+- RDTB import/rebuild preserves all 14 logical pointer slots, SMALL `0xFFFFFFFF` sentinels and MIRRORED aliases; conflicting replacement payloads for aliased slots are rejected instead of silently choosing one.
+- Model command errors use the shared handler: invalid arguments, missing inputs, failed GLB validation, and failed model-format verification set a nonzero exit code without a misleading generic `[OK] Finished!` message.
+- New manifests record auto-scale; the importer reverses that export-only scale before applying the requested `c3d --scale` factor.
+- RDTB and GDTB archive outputs use backup-based replacement. If rebuilding imported textures fails, an existing output GDTB is preserved rather than overwritten with a fallback copy.
+
+**Optimized / maintainability**
+- Moved model file detection, `[split]` parsing, RDTB/SRDB branching, post-export texture fixing, OBJ-to-GLB conversion, batch export, and model import dispatch into `ModelCommandHandler.cs`; all five model CLI cases in `Program.cs` now delegate to this handler and suppress the generic completion message.
+- Expanded source-level regression checks for normal-stream parsing, LOD filtering, scale round-trip metadata, texture slot ordering, model command dispatch, RDTB pointer sentinels/aliases, and validated conversion outputs.
+
+**Known limitations**
+- These changes improve static mesh extraction and avoid obvious LOD duplication, but do not decode the complete PS2 skeleton rotation hierarchy, skin weights, or animation. The assembled body preview may therefore still differ from the in-game pose or exact relative world-space placement.
+- `x3d split` is an editable per-texture import folder. For the most granular edits (especially animated body/tool batches), `xbatches`/`cbatches` remains the safer workflow because it preserves per-batch centroids and handles each batch independently. The assembled view is kept in a subfolder so the importer does not accidentally load it as an editable source OBJ.
+- Re-exporting into an existing folder overwrites generated model files and refreshes source snapshots. Back up user-edited OBJ/texture files before re-exporting if they need to be retained.
+- Manifests created by older versions do not contain `coordinate_scale`; their original automatic export scale cannot be reconstructed reliably. Re-export with the current version before importing if the old model was automatically scaled.
 
 ## What is this?
 
@@ -29,10 +72,15 @@ new features to allow deep modding of the game's assets including textures, audi
 The `x3dglb` command uses the existing RDTB/SRDB model and GDTB texture parsers, keeps the ordinary OBJ/MTL/textures for editing, and also writes `.glb` files that can be opened directly in Blender, Godot, Unity (via glTF import), and glTF viewers.
 
 ```text
+tool.exe x3d <file.rdtb> <file.gdtb> <base>
+tool.exe x3d split <file.rdtb> <file.gdtb> <base>
+tool.exe c3d <models_folder> <output_folder> [--scale N] [--small|--mirrored|--big]
 tool.exe x3dglb <file.rdtb|file.srdb> <file.gdtb> <base>
-tool.exe x3dglb split <file.rdtb> <file.gdtb> <base>
+tool.exe x3dglb split <file.rdtb|file.srdb> <file.gdtb> <base>
 tool.exe obj2glb <input.obj> [output.glb]
 ```
+
+`x3d` exports the combined viewer/reference OBJ. `x3d split` additionally exports `<base>_obj`, an importable per-texture folder with a manifest and source snapshots. After editing that folder, use `c3d` to rebuild the RDTB/GDTB pair. The default output keeps the source RDTB format; a format flag can request small, mirrored, or big output explicitly. Run the import into a separate output folder rather than overwriting the original archive directory.
 
 Use `obj2glb` when you already have an OBJ exported by this tool or another application. It reads the associated MTL and relative textures; if the output path is omitted, the GLB is written beside the OBJ with the same base name. The GLB output is written through a temporary file before replacing the final file.
 
@@ -332,10 +380,11 @@ with the new `xbatches`/`cbatches` per-batch workflow.*
 - **Added** Cross-character mesh wrap (`-x3d_dual`) experimental
 - **Added** Native layout mode (`-x3dnative`)
 - **Added** Single chunk extractor (`-x3dchunk`)
-- **Known Issue** Body 3D model positions still corrupted
-- **Known Issue** Some NPC models appear as tube/cylinder shape
-- **Known Issue** Cross-character mesh transplant not yet working
-- **Working On** Correct world-space vertex positions
+- **Changed** Combined OBJ preview now uses the primary LOD only and no longer adds artificial spread offsets.
+- **Fixed** Small-RDTB normal-row parsing and numeric texture-slot mapping.
+- **Known Issue** Complete skeletal rotations, skinning, and animation are not reconstructed; some body-part world positions may still differ from the game.
+- **Known Issue** Some NPC models appear as tube/cylinder shape.
+- **Known Issue** Cross-character mesh transplant not yet working.
 - **Working On** Skeleton export with mesh for Blender rigging
 - **Working On** Full mesh replacement into game
 - **Working On** .SRDB map model archive exporter
@@ -407,31 +456,17 @@ to scale during rebuild:
 
 ---
 
-### 3D Model Export Positions ⚠️ NOT YET CORRECT
-Body 3D model vertices are currently exported with
-incorrect world-space positions. The geometry shape
-is extracted correctly and you can edit vertex
-positions of the same character without issues,
-but the body part positions relative to each other
-in the extracted OBJ files are not yet matching
-their true world-space positions.
+### 3D Model Export Positions ⚠️ IMPROVED, NOT FULLY SOLVED
+The combined viewer export now keeps only the primary/highest-detail LOD when the RDTB contains chunks 11/12/13, and the artificial texture-group spread offsets have been removed. This prevents the most obvious doubled/fragmented preview caused by overlapping LOD meshes and export-only offsets.
 
-This is caused by PS2 VIF bone transform data
-not yet being fully decoded.
-
-Tools/items (model_05) are exported correctly and
-centered at the world origin with proper separation.
+Exact in-game body placement is still not guaranteed: the parser does not yet reconstruct the full PS2 bone rotation hierarchy, skin weights, or animation. The model's static vertex/normal/UV streams are exported, but the remaining skeleton transforms can affect relative part placement and pose.
 
 **What this means for modders:**
-- ✅ You CAN edit existing vertices (move, scale,
-  reshape any part of the model)
-- ✅ You CAN upscale/downscale entire models
-- ✅ You CAN replace textures freely
-- ✅ You CAN swap the player's head batch
-  (batch_0005) with a completely new mesh
-- ❌ Extracted body part positions don't match
-  the in-game positions (parts appear separated
-  in Blender but render correctly in game)
+- ✅ The assembled viewer OBJ no longer overlays all detected LODs on top of each other.
+- ✅ Texture IDs are mapped numerically, and current manifests preserve export auto-scale for import.
+- ✅ You can still edit vertices, replace textures, and use the per-batch `xbatches`/`cbatches` workflow.
+- ⚠️ The assembled OBJ is a static inspection view, not a skinned/animated game-equivalent model.
+- ⚠️ Export and import must be tested with the target character and game build before replacing production assets.
 
 ---
 
@@ -631,8 +666,8 @@ The `.RDTB` format is a 3D model archive. It works together with `.GDTB`:
 | texture_06 | Shoes and ankles |
 
 **Status:** Basic extraction working.
-Vertex positions still being researched.
-Skeleton export with mesh in progress.
+Primary-LOD display, normal-row parsing, texture-index mapping, and scale metadata are improved.
+Full skeletal transforms, skinning, and animation export remain in progress.
 
 ---
 
@@ -678,7 +713,7 @@ Skeleton export with mesh in progress.
     Creates 2 output folders:
 
       <base_name>_3d_batches_obj/       moddable OBJ files
-      <base_name>_all_obj/       not moddable OBJ files - view only (Extraction's still a bit corrupted)
+      <base_name>_all_obj/       assembled primary-LOD OBJ view plus materials/textures
 
 
 What works:
@@ -691,7 +726,7 @@ What works:
   
   ✅ Tools/items exported centered and separated
   
-  ✅ Body part positions correctly placed in world space
+  ⚠️ Primary-LOD assembled preview without duplicate LOD overlays; full skeletal world transforms remain incomplete
   
   ✅ SRDB archive extraction with per-embedded textures
   
@@ -907,7 +942,7 @@ HMSTHModdingTool.exe verify model.RDTB --json reports\model-validation.json
 
 The console report separates errors from warnings. JSON output is optional and cannot target the same path as the input archive. A `PASS` means no structural issue was detected by the supported checks; it is not a guarantee that every game-specific payload can be decoded.
 
-After a Windows Release build, run the included smoke tests with:
+The command returns exit code `0` when validation and optional report writing succeed, and `1` when validation fails, arguments are invalid, or the JSON report cannot be written. The command dispatcher also returns a nonzero status for unknown commands and exceptions that it catches. After a Windows Release build, run the archive-validation smoke tests with:
 
 ```bat
 py tests\ArchiveValidation\run_tests.py --exe HMSTHModdingTool\bin\Release\HMSTHModdingTool.exe
@@ -1200,8 +1235,17 @@ ALL-IN-ONE auto-fix. Runs 3 fixes in order:
 3. Fixes LBA table in ELF
 
 Now works on `.iso`, `.img`, `.bin`, and `.raw` files.
-If `.bin` file is actually a 2048-sector ISO inside,
-auto-converts to real BIN + CUE format after fixing.
+If `.bin` or `.raw` file is actually a 2048-sector ISO inside,
+auto-converts to real BIN + CUE format after fixing. ISO/BIN conversions and
+in-place sector repairs now write to a temporary sibling file, verify the
+completed output, and preserve the replaced original as a uniquely named
+`.hmsth-backup-*.bak` file in the same directory. Logo and LBA patches also run
+on unique temporary sibling images before committing. Temporary files reserved
+with the `.hmsth-tmp-` prefix are replaced without creating huge scratch backups;
+normal user files retain a backup. ISO repair requires a verified `CD001` primary
+volume descriptor and rejects incomplete sector data instead of guessing from
+file size alone. If a safe replacement cannot be completed, the original is left
+in place and the command reports failure.
 
 ```
 -fixisoonly <file.iso>
