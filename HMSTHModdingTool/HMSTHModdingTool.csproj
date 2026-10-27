@@ -64,6 +64,7 @@
     <Compile Include="GDTB\GDTBTexture.cs" />
     <Compile Include="IO\HMSTHIsoConverter.cs" />
     <Compile Include="IO\ControlsRemapper.cs" />
+    <Compile Include="IO\CdRomSectorEncoder.cs" />
     <Compile Include="IO\GameVersion.cs" />
     <Compile Include="IO\HarvestDataArchive.cs" />
     <Compile Include="IO\HarvestElf.cs" />
