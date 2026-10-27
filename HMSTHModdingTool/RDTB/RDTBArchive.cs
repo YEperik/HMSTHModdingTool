@@ -2189,7 +2189,13 @@ namespace HMSTHModdingTool.RDTB
             byte[] result = AssembleRDTBWithSlots(
                 chunksBySlot, mf, _data);
 
-            File.WriteAllBytes(_filepath, result);
+            string backupPath =
+                SafeFileReplacement.WriteAllBytesWithBackup(_filepath, result);
+            if (!string.IsNullOrEmpty(backupPath))
+            {
+                Console.WriteLine(
+                    "Original RDTB preserved as backup: " + backupPath);
+            }
             Console.ForegroundColor =
                 ConsoleColor.Green;
             Console.WriteLine("[OK] Chunk replaced!");
